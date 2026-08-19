@@ -18,8 +18,11 @@ public struct CalibrationPoint: Sendable, Codable, Equatable {
   public let systemWatts: Double?
   /// `systemWatts` minus the baseline draw: the cost of the load itself.
   public let systemWattsDelta: Double?
+  /// SoC package power in watts, from powermetrics. Needs root.
   public let packageWatts: Double?
+  /// Package watts above the baseline captured before the sweep.
   public let packageWattsDelta: Double?
+  /// GPU power in watts, from powermetrics.
   public let gpuWatts: Double?
   /// System draw minus package draw: display, radios, everything else.
   public let otherWatts: Double?
@@ -80,11 +83,15 @@ public struct PowerCurve: Sendable, Codable, Equatable {
   public let powerSource: Source
   /// Utilization with no stressd load, captured before the sweep.
   public let baselineUtilization: Double
+  /// Whole-system draw in watts with no stressd load.
   public let baselineWatts: Double?
   /// Points sorted by requested load, regardless of measurement order.
   public let points: [CalibrationPoint]
+  /// Seconds averaged at each point, after settling.
   public let dwellSeconds: Double
+  /// Seconds discarded after each load change, before averaging.
   public let settleSeconds: Double
+  /// Minimum seconds idled between points.
   public let cooldownSeconds: Double
 
   public enum Source: String, Sendable, Codable {

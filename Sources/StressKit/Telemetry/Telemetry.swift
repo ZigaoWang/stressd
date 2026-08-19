@@ -10,6 +10,7 @@ public struct Telemetry: Sendable, Codable {
   public let interval: TimeInterval
   public let cpu: CPUSample
   public let thermalState: ThermalState
+  /// GPU busy fraction `0...1`. Not yet populated.
   public let gpuUtilization: Double?
 
   // MARK: Power. All optional: package power needs root and is never required,
@@ -17,6 +18,7 @@ public struct Telemetry: Sendable, Codable {
 
   /// CPU package power from powermetrics.
   public let packagePowerWatts: Double?
+  /// GPU power in watts, from powermetrics. Needs root.
   public let gpuPowerWatts: Double?
   /// System draw minus package draw: display, radios, storage, everything
   /// else. Only derivable on battery, where battery watts measure the whole
@@ -37,7 +39,9 @@ public struct Telemetry: Sendable, Codable {
   public let batterySmoothedWatts: Double?
   public let isCharging: Bool?
   public let isConnectedToPower: Bool?
+  /// Battery charge cycles completed.
   public let cycleCount: Int?
+  /// Battery temperature in degrees Celsius.
   public let batteryTemperatureCelsius: Double?
   /// Fraction of the current load that is real contributed work, `0...1`.
   /// Zero while the synthetic source is the only one running.

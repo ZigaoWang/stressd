@@ -4,6 +4,7 @@ import Foundation
 public struct PowerSample: Sendable, Codable, Equatable {
   /// CPU package power in watts.
   public let cpuWatts: Double?
+  /// GPU power in watts.
   public let gpuWatts: Double?
   /// Apple Neural Engine, when the sampler reports it.
   public let aneWatts: Double?
@@ -156,6 +157,7 @@ public final class PowerMonitor: @unchecked Sendable {
   private var availability: PowerAvailability = .available
   private var stderrText = ""
 
+  /// Sampling interval handed to powermetrics, in milliseconds.
   public let intervalMilliseconds: Int
 
   public init(intervalMilliseconds: Int = 1000) {

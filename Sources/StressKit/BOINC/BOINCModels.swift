@@ -60,7 +60,9 @@ public struct BOINCTask: Sendable, Codable, Equatable {
   public let projectURL: String?
   /// `0...1`, when the task is running.
   public let fractionDone: Double?
+  /// Seconds of CPU time this task has already used.
   public let elapsedSeconds: Double?
+  /// Estimated seconds of CPU time remaining.
   public let remainingSeconds: Double?
   public let isSuspended: Bool
   /// `active_task_state`: 1 is executing. Absent means the task is not

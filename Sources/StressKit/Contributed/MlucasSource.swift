@@ -196,6 +196,7 @@ public enum MlucasWorktodo {
 public struct MlucasProgress: Sendable, Equatable {
   public let exponent: Int?
   public let iteration: Int?
+  /// Progress as a percentage, `0...100`, as mlucas prints it.
   public let percentComplete: Double?
 
   public init(exponent: Int?, iteration: Int?, percentComplete: Double?) {

@@ -45,7 +45,9 @@ public struct GPUGeometry: Sendable, Codable, Equatable {
 /// A read of the GPU worker's counters.
 public struct GPUWorkerSample: Sendable, Codable, Equatable {
   public let profile: GPUProfile
+  /// Duty cycle asked for, as a fraction `0...1`.
   public let requestedDutyCycle: Double
+  /// Dispatch time over wall time, as a fraction `0...1`.
   public let achievedDutyCycle: Double?
   public let dispatches: UInt64
   /// Estimated throughput. **An estimate from a counted FLOP-per-iteration

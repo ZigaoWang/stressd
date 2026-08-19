@@ -26,6 +26,7 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
 
   /// A read of the whole pool.
   public struct Snapshot: Sendable {
+    /// Duty cycle asked for, as a fraction `0...1`.
     public let requestedDutyCycle: Double
     public let placement: Placement
     public let workers: [WorkerSample]

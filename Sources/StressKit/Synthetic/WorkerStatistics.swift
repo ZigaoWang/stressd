@@ -32,7 +32,9 @@ final class WorkerStatistics: @unchecked Sendable {
 /// A point-in-time read of one worker's counters.
 public struct WorkerSample: Sendable, Equatable {
   public let iterations: UInt64
+  /// Nanoseconds spent computing, summed across this worker's lifetime.
   public let busyNanoseconds: UInt64
+  /// Wall-clock nanoseconds this worker has been running.
   public let elapsedNanoseconds: UInt64
   public let abandonedCycles: UInt64
   public let cycles: UInt64

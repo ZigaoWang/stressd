@@ -138,6 +138,7 @@ public struct PowerDrawController: Sendable, Equatable {
   /// Most the load fraction may move per second.
   public static let slewRatePerSecond = 0.10
 
+  /// Whole-system draw being held, in watts.
   public let targetWatts: Double
   private let wattsPerFullLoad: Double
   private(set) public var load: Double = 0

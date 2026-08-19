@@ -15,10 +15,12 @@ public struct BatteryReading: Sendable, Codable, Equatable {
 
   /// Instantaneous current in milliamps, signed: negative is discharging.
   public let milliamps: Double?
+  /// Pack voltage in millivolts. Watts are (mA x mV) / 1e6.
   public let millivolts: Double?
   /// Instantaneous power in watts, signed: **negative means discharging**.
   public let watts: Double?
 
+  /// Charge cycles the battery has completed.
   public let cycleCount: Int?
   /// Degrees Celsius.
   public let temperatureCelsius: Double?

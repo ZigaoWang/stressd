@@ -73,6 +73,7 @@ public struct DutyCycleScheduler: Sendable, Equatable {
   /// visible burst of catch-up load. Work beyond this is written off.
   public static let maximumDebtQuanta: UInt64 = 2
 
+  /// Length of one work-then-sleep cycle, in nanoseconds.
   public let periodNanoseconds: UInt64
 
   /// The instant cycle 0 began. Reset when a worker falls too far behind.

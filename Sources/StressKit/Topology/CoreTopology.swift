@@ -46,8 +46,11 @@ public struct PerformanceLevel: Sendable, Codable, Equatable, Identifiable {
   /// used by `host_processor_info`, so per-core telemetry lines up with them
   /// directly.
   public let logicalCPUIDs: [Int]
+  /// L1 instruction cache size in bytes, when the kernel reports one.
   public let l1InstructionCacheBytes: Int?
+  /// L1 data cache size in bytes.
   public let l1DataCacheBytes: Int?
+  /// L2 cache size in bytes, shared across `coresPerL2` cores.
   public let l2CacheBytes: Int?
   /// Cores sharing an L2, i.e. the cluster width.
   public let coresPerL2: Int?
@@ -110,8 +113,11 @@ public struct CoreTopology: Sendable, Codable, Equatable {
   public let chipName: String?
   public let logicalCoreCount: Int
   public let physicalCoreCount: Int
+  /// Installed memory in bytes.
   public let physicalMemoryBytes: UInt64
+  /// Cache line size in bytes.
   public let cacheLineSizeBytes: Int?
+  /// VM page size in bytes. 16384 on Apple silicon.
   public let pageSizeBytes: Int?
   /// Fastest level first.
   public let performanceLevels: [PerformanceLevel]
