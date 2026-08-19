@@ -78,14 +78,18 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
   ///   - periodPolicy: Measures the timer coalescing window so the period can be
   ///     derived from the running machine rather than hardcoded.
   ///   - clock: Injected so scheduling can be exercised without real threads.
+  public let kind: WorkerKind
+
   public init(
     topology: CoreTopology,
     levelIndex: Int?,
+    kind: WorkerKind = .cpuFloat,
     periodNanoseconds: UInt64? = nil,
     periodPolicy: PeriodPolicy = PeriodPolicy(),
     clock: any MonotonicClock = MachMonotonicClock()
   ) {
     self.clock = clock
+    self.kind = kind
     self.periodPolicy = periodPolicy
     self.periodOverride = periodNanoseconds.map {
       max($0, DutyCycleScheduler.minimumPeriodNanoseconds)
@@ -120,6 +124,7 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
             logicalIndex: built.count,
             performanceLevelIndex: level.index,
             qosHint: level.qosHint,
+            kind: kind,
             periodNanoseconds: cell,
             clock: clock,
             dutyCycle: dutyCycle,

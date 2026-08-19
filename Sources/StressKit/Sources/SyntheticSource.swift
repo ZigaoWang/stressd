@@ -58,6 +58,7 @@ public actor SyntheticSource: LoadSource {
   public nonisolated let isContributing = false
 
   private let topology: CoreTopology
+  private let kind: WorkerKind
   private let gpuProfile: GPUProfile
   private nonisolated let gpuBox = GPUBox()
   private let periodNanoseconds: UInt64?
@@ -71,17 +72,20 @@ public actor SyntheticSource: LoadSource {
   public init(
     topology: CoreTopology,
     periodNanoseconds: UInt64? = nil,
+    kind: WorkerKind = .cpuFloat,
     gpuProfile: GPUProfile = .mixed,
     clock: any MonotonicClock = MachMonotonicClock()
   ) {
     self.topology = topology
+    self.kind = kind
     self.gpuProfile = gpuProfile
     self.periodNanoseconds = periodNanoseconds
     self.clock = clock
   }
 
   public func detect() async -> DetectionResult {
-    .available(detail: "cpuFloat, \(topology.logicalCoreCount) logical cores")
+    .available(
+      detail: "\(kind.rawValue) (\(kind.summary)), \(topology.logicalCoreCount) logical cores")
   }
 
   public func start(budget: ResourceBudget) async throws {
@@ -99,6 +103,7 @@ public actor SyntheticSource: LoadSource {
     let pool = SyntheticWorkerPool(
       topology: topology,
       levelIndex: budget.placement.levelIndex,
+      kind: kind,
       periodNanoseconds: periodNanoseconds,
       periodPolicy: periodPolicy,
       clock: clock)
@@ -196,7 +201,7 @@ public actor SyntheticSource: LoadSource {
       achievedLoad: snapshot.achievedDutyCycle,
       threadCount: snapshot.placement.threadCount,
       detail: [
-        "kind": "cpuFloat",
+        "kind": kind.rawValue,
         "placement": snapshot.placement.requestedLevelName,
         "qosHint": snapshot.placement.qosHint.rawValue,
         "targetedCPUs": snapshot.placement.targetedLogicalCPUs.map(String.init)
@@ -209,7 +214,7 @@ public actor SyntheticSource: LoadSource {
         "periodsMs": snapshot.periodNanosecondsByLevel.keys.sorted()
           .map { "L\($0):\((snapshot.periodNanosecondsByLevel[$0] ?? 0) / 1_000_000)" }
           .joined(separator: " "),
-        "gflops": String(format: "%.1f", Self.gigaflops(snapshot: snapshot)),
+        "gflops": String(format: "%.1f", gigaflops(snapshot: snapshot)),
       ].merging(gpuDetail()) { current, _ in current })
   }
 
@@ -232,12 +237,14 @@ public actor SyntheticSource: LoadSource {
   /// The divisor is wall-clock time, not summed thread time. Thread time would
   /// give the mean throughput of a single worker, which on a twelve core
   /// machine is off by a factor of twelve.
-  static func gigaflops(snapshot: SyntheticWorkerPool.Snapshot) -> Double {
+  nonisolated func gigaflops(snapshot: SyntheticWorkerPool.Snapshot) -> Double {
     let workerCount = snapshot.workers.count
     guard workerCount > 0 else { return 0 }
     let summedElapsed = snapshot.workers.reduce(0) { $0 + $1.elapsedNanoseconds }
     let wallNanoseconds = Double(summedElapsed) / Double(workerCount)
     guard wallNanoseconds > 0 else { return 0 }
-    return CPUFloatKernel.flops(forIterations: Int(snapshot.totalIterations)) / wallNanoseconds
+    let flopsPerIteration =
+      AnyComputeKernel(kind: kind, seed: 0).flopsPerIteration
+    return Double(snapshot.totalIterations) * flopsPerIteration / wallNanoseconds
   }
 }

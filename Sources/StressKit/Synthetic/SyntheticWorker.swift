@@ -17,10 +17,6 @@ final class SyntheticWorker: @unchecked Sendable {
   /// them costs more in overshoot than it gains in accuracy.
   private static let minimumChunkNanoseconds: UInt64 = 2_000
 
-  /// First chunk, before there is a measurement to size one from. Roughly
-  /// 5-20 microseconds depending on the core it lands on.
-  private static let calibrationIterations = 2_048
-
   /// Backstop against a wildly wrong estimate turning into a multi-second
   /// chunk that ignores its deadline.
   private static let maximumChunkIterations = 8_000_000
@@ -28,6 +24,7 @@ final class SyntheticWorker: @unchecked Sendable {
   let logicalIndex: Int
   let performanceLevelIndex: Int
   let qosHint: QoSHint
+  let kind: WorkerKind
   let statistics = WorkerStatistics()
 
   private let clock: any MonotonicClock
@@ -41,6 +38,7 @@ final class SyntheticWorker: @unchecked Sendable {
     logicalIndex: Int,
     performanceLevelIndex: Int,
     qosHint: QoSHint,
+    kind: WorkerKind = .cpuFloat,
     periodNanoseconds: AtomicUInt64,
     clock: any MonotonicClock,
     dutyCycle: AtomicDouble,
@@ -50,6 +48,7 @@ final class SyntheticWorker: @unchecked Sendable {
     self.logicalIndex = logicalIndex
     self.performanceLevelIndex = performanceLevelIndex
     self.qosHint = qosHint
+    self.kind = kind
     self.periodNanoseconds = periodNanoseconds
     self.clock = clock
     self.dutyCycle = dutyCycle
@@ -69,7 +68,8 @@ final class SyntheticWorker: @unchecked Sendable {
     // without touching placement. See QoSHint.recommendedPeriodNanoseconds.
     pthread_set_qos_class_self_np(qosHint.qosClass, 0)
 
-    var kernel = CPUFloatKernel(seed: UInt64(logicalIndex &+ 1))
+    var kernel = AnyComputeKernel(kind: kind, seed: UInt64(logicalIndex &+ 1))
+    defer { kernel.release() }
     var estimator = IterationRateEstimator()
     var activePeriod = periodNanoseconds.load()
     var scheduler = DutyCycleScheduler(
@@ -125,7 +125,7 @@ final class SyntheticWorker: @unchecked Sendable {
   /// Runs calibrated chunks until the deadline, returning nanoseconds spent.
   private func compute(
     until deadline: UInt64,
-    kernel: inout CPUFloatKernel,
+    kernel: inout AnyComputeKernel,
     estimator: inout IterationRateEstimator
   ) -> UInt64 {
     var now = clock.nanoseconds()
@@ -139,7 +139,7 @@ final class SyntheticWorker: @unchecked Sendable {
       let budget = min(remaining, Self.chunkTargetNanoseconds)
       let iterations =
         estimator.iterations(forNanoseconds: budget, maximum: Self.maximumChunkIterations)
-        ?? Self.calibrationIterations
+        ?? kernel.calibrationIterations
 
       kernel.run(iterations: iterations)
 

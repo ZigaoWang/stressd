@@ -33,6 +33,11 @@ struct RunCommand: AsyncParsableCommand {
 
   @Option(
     name: .long,
+    help: "CPU workload: cpuFloat, cpuInteger, cpuMemory, or cpuMatrix.")
+  var kind: String = "cpuFloat"
+
+  @Option(
+    name: .long,
     help: """
       Hold a whole-system power draw in watts instead of a utilization target. \
       Needs a battery reading, or root for package power. Seeds itself from \
@@ -98,6 +103,10 @@ struct RunCommand: AsyncParsableCommand {
         throw ValidationError("--gpu must be between 0 and 100")
       }
     }
+    guard WorkerKind(rawValue: kind) != nil else {
+      throw ValidationError(
+        "--kind must be one of: " + WorkerKind.allCases.map(\.rawValue).joined(separator: ", "))
+    }
     guard GPUProfile(rawValue: gpuProfile) != nil else {
       throw ValidationError(
         "--gpu-profile must be one of: "
@@ -136,6 +145,7 @@ struct RunCommand: AsyncParsableCommand {
     let source = SyntheticSource(
       topology: topology,
       periodNanoseconds: periodMilliseconds.map { UInt64($0 * 1_000_000) },
+      kind: WorkerKind(rawValue: kind) ?? .cpuFloat,
       gpuProfile: GPUProfile(rawValue: gpuProfile) ?? .mixed)
     // Synchronous so the atexit backstop can use it. Threads must not outlive
     // the process under any exit path.
