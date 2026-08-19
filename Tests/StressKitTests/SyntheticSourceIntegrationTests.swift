@@ -25,17 +25,33 @@ struct SyntheticSourceIntegrationTests {
     try CoreTopologyDetector().detect()
   }
 
-  /// Runs the source at `target` and returns observed system-wide utilization
-  /// and the duty cycle the workers measured for themselves.
+  /// Measures utilization with no stressd load, for use as a baseline.
+  ///
+  /// This suite runs on machines with a real working set. An absolute
+  /// utilization threshold would be asserting something about the host, not
+  /// about stressd, so every observed figure is compared against this instead.
+  private func baselineUtilization(
+    _ topology: CoreTopology, seconds: Double = 4
+  ) async throws
+    -> Double
+  {
+    let sampler = try CPUUtilizationSampler(topology: topology)
+    try await Task.sleep(for: .seconds(seconds))
+    return try #require(try await sampler.sample()).systemWide
+  }
+
+  /// Runs the source at `target` and returns the baseline, the observed
+  /// utilization under load, and the duty cycle the workers measured.
   private func measure(
     target: Double,
     seconds: Double,
     placement: CorePlacement = .allCores
-  ) async throws -> (observed: Double, workerMeasured: Double?) {
+  ) async throws -> (baseline: Double, observed: Double, workerMeasured: Double?) {
     let topology = try liveTopology()
+    let baseline = try await baselineUtilization(topology)
+
     let source = SyntheticSource(topology: topology)
     defer { source.emergencyStop() }
-
     try await source.start(budget: ResourceBudget(cpu: target, placement: placement))
 
     // Let frequency scaling and the iteration rate estimator settle before
@@ -48,19 +64,29 @@ struct SyntheticSourceIntegrationTests {
 
     let status = try await source.status()
     await source.stop()
-    return (sample.systemWide, status.achievedLoad)
+    return (baseline, sample.systemWide, status.achievedLoad)
   }
+
+  /// How much of the requested load must show up as a utilization delta.
+  ///
+  /// Not 100%: stressd's threads compete with the machine's existing work
+  /// rather than stacking on top of it, so some of the requested load displaces
+  /// what was already running instead of adding to it. The busier the host, the
+  /// more displacement. Two thirds is comfortably above what a broken duty
+  /// cycler would produce while tolerating a loaded machine.
+  private static let minimumDeltaFraction = 0.66
 
   @Test("Ten seconds at 50% holds close to 50%", .timeLimit(.minutes(2)))
   func holdsFiftyPercent() async throws {
     let result = try await measure(target: 0.5, seconds: 10)
 
-    // Only a lower bound is assertable. The system-wide figure includes
-    // everything else on the machine, which can only push it up, and there is
-    // no ceiling to test against: this suite has run on a host idling at 62%.
-    #expect(
-      result.observed > 0.44,
-      "observed \(percent(result.observed)) for a 50% request")
+    // Differential, so the assertion is about stressd rather than about
+    // whatever else the host is running.
+    let delta = result.observed - result.baseline
+    let fiftyDetail =
+      "baseline \(percent(result.baseline)), observed \(percent(result.observed)), "
+      + "delta \(percent(delta)) for a 50% request"
+    #expect(delta > 0.5 * Self.minimumDeltaFraction, Comment(rawValue: fiftyDetail))
 
     // The workers' own measurement excludes background load, so this is the
     // tight assertion: the duty cycler being right or wrong.
@@ -84,9 +110,12 @@ struct SyntheticSourceIntegrationTests {
     #expect(
       abs(measured - target) < 0.05,
       "workers measured \(percent(measured)) for a \(percent(target)) request")
-    #expect(
-      result.observed > target - 0.08,
-      "observed \(percent(result.observed)) for a \(percent(target)) request")
+
+    let delta = result.observed - result.baseline
+    let deltaDetail =
+      "baseline \(percent(result.baseline)), observed \(percent(result.observed)), "
+      + "delta \(percent(delta)) for a \(percent(target)) request"
+    #expect(delta > target * Self.minimumDeltaFraction, Comment(rawValue: deltaDetail))
   }
 
   @Test("adjust changes the load without respawning threads", .timeLimit(.minutes(2)))
@@ -119,6 +148,8 @@ struct SyntheticSourceIntegrationTests {
   @Test("A zero target parks the threads rather than spinning", .timeLimit(.minutes(2)))
   func zeroTargetParks() async throws {
     let topology = try liveTopology()
+    let baseline = try await baselineUtilization(topology)
+
     let source = SyntheticSource(topology: topology)
     defer { source.emergencyStop() }
 
@@ -126,14 +157,22 @@ struct SyntheticSourceIntegrationTests {
     try await Task.sleep(for: .seconds(1))
 
     let before = try #require(source.poolSnapshot()).totalIterations
+    let sampler = try CPUUtilizationSampler(topology: topology)
     try await Task.sleep(for: .seconds(3))
+    let parked = try #require(try await sampler.sample())
     let after = try #require(source.poolSnapshot()).totalIterations
 
     // The worker's own iteration counter is the definitive check, and it is
     // exact: a parked thread performs no iterations at all, where a thread
-    // spinning at 0% duty would perform millions. System-wide utilization
-    // cannot answer this, because everything else on the machine lands in it.
+    // spinning at 0% duty would perform millions.
     #expect(after == before, "parked workers must not be computing")
+
+    // Corroborated differentially: parked workers must not raise utilization
+    // measurably above what the machine was already doing.
+    let parkedDetail =
+      "baseline \(percent(baseline)), parked \(percent(parked.systemWide)); "
+      + "a parked pool should add nothing"
+    #expect(parked.systemWide - baseline < 0.10, Comment(rawValue: parkedDetail))
 
     await source.stop()
   }
@@ -152,12 +191,19 @@ struct SyntheticSourceIntegrationTests {
     let sample = try #require(try await sampler.sample())
     await source.stop()
 
-    // A 50% target implemented as half the threads at 100% would leave cores
-    // near idle. Every core must be carrying some of it.
+    // A 50% target implemented as half the threads at 100% would leave half
+    // the cores at their baseline. Every core must be carrying some of it.
     let quietest = sample.perCore.map(\.busy).min() ?? 0
     #expect(
       quietest > 0.2,
       "quietest core at \(percent(quietest)); load should be spread, not pinned")
+
+    // Differential form of the same claim: the spread between the busiest and
+    // quietest core stays narrow. Pinning would make it enormous.
+    let busiest = sample.perCore.map(\.busy).max() ?? 0
+    #expect(
+      busiest - quietest < 0.6,
+      "spread \(percent(busiest - quietest)) between busiest and quietest core")
   }
 
   @Test("Targeting one performance level sizes the pool to it", .timeLimit(.minutes(2)))
