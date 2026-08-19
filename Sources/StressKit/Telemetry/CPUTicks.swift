@@ -67,6 +67,9 @@ public struct CoreUtilization: Sendable, Equatable, Codable {
   public let system: Double
   public let nice: Double
   public let idle: Double
+  /// Everything that is not idle. Stored rather than computed so it appears in
+  /// the JSON alongside `idle`, which callers diff against `top`.
+  public let busy: Double
 
   public init(cpu: Int, user: Double, system: Double, nice: Double, idle: Double) {
     self.cpu = cpu
@@ -74,13 +77,10 @@ public struct CoreUtilization: Sendable, Equatable, Codable {
     self.system = system
     self.nice = nice
     self.idle = idle
+    // Derived from idle rather than summed from the other three, so busy and
+    // idle can never disagree.
+    self.busy = min(max(1 - idle, 0), 1)
   }
-
-  /// Everything that is not idle.
-  ///
-  /// Derived from `idle` rather than summed from the other three, so `busy` and
-  /// `idle` can never disagree.
-  public var busy: Double { min(max(1 - idle, 0), 1) }
 
   /// Whether the four buckets partition the interval, as they must.
   public var sumsToWhole: Bool {
@@ -97,8 +97,8 @@ public struct PerfLevelUtilization: Sendable, Equatable, Codable {
   public let system: Double
   public let nice: Double
   public let idle: Double
-
-  public var busy: Double { min(max(1 - idle, 0), 1) }
+  /// Everything that is not idle. Stored so it appears in the JSON.
+  public let busy: Double
 
   /// Mean over the cores on a level. Every core is one thread's worth of
   /// capacity, so an unweighted mean is the right aggregate.
@@ -112,6 +112,7 @@ public struct PerfLevelUtilization: Sendable, Equatable, Codable {
     self.system = cores.reduce(0) { $0 + $1.system } / count
     self.nice = cores.reduce(0) { $0 + $1.nice } / count
     self.idle = cores.reduce(0) { $0 + $1.idle } / count
+    self.busy = min(max(1 - (cores.reduce(0) { $0 + $1.idle } / count), 0), 1)
   }
 }
 

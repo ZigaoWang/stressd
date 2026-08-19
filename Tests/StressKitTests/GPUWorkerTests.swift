@@ -77,9 +77,10 @@ struct GPUWorkerTests {
 
     let achieved = try #require(sample.achievedDutyCycle)
     // Looser than the CPU worker's tolerance on purpose: a dispatch cannot be
-    // cut short once submitted, so batch length is the granularity of control.
+    // cut short once submitted, so the last batch of a cycle can overrun by up
+    // to one batch length. See MetalGPUWorker.batchTargetNanoseconds.
     #expect(
-      abs(achieved - 0.5) < 0.15,
+      abs(achieved - 0.5) < 0.18,
       "GPU achieved \(achieved) for a 50% request")
     #expect(sample.dispatches > 0)
   }

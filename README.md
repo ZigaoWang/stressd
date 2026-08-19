@@ -2,464 +2,214 @@
 
 **Stress testing that doesn't waste the work.**
 
-Every stress tester on macOS burns cycles on garbage — synthetic loops whose
-output goes straight to `/dev/null`. `stressd` runs real volunteer distributed
-computing workloads as its load source instead. Same heat, same power draw, same
-sustained pressure on the machine, except the FLOPs go to gravitational wave
-searches and prime number hunts rather than nowhere.
-
-Synthetic load is still there when you need it — as a fallback when no
-contributed work is available, and as the precision instrument for holding an
-exact utilization or wattage target. But the default is real work.
-
-macOS 14+, Apple silicon only.
+macOS 14+, Apple silicon. Written in Swift.
 
 ---
 
-## Status
+## The finding that shaped this project
 
-Under construction, built in stages. What exists today:
+macOS coalesces timer wake-ups, and how aggressively depends on the thread's
+QoS class. Measured on an M3 Pro running macOS 26.6 — median overshoot on a
+requested **2.5 ms** `mach_wait_until`:
 
-| | |
+| QoS class | default | with latency tier 0 |
+|---|---:|---:|
+| `.userInteractive` | 638 µs | 325 µs |
+| `.utility` | 7 654 µs | 324 µs |
+| `.background` | **77 635 µs** | 329 µs |
+
+A duty cycler built on a 5 ms period cannot survive a 77 ms overshoot. That is
+what a `.background` worker was really doing: 2.5 ms of work, then an 80 ms
+sleep — about **3% duty against a 50% request**.
+
+The obvious fix is `THREAD_LATENCY_QOS_POLICY`. It works, and it costs you the
+thing you asked for: every latency tier precise enough to matter also lifts the
+thread off the efficiency cores.
+
+| latency tier | overshoot | E-cores | P-cores |
+|---|---:|---:|---:|
+| default | 76 880 µs | 58% | 14% |
+| tier 0 | 324 µs | 46% | **62%** |
+| tier 3 | 8 857 µs | 60% | 30% |
+
+So stressd does neither. It **measures the coalescing window at startup** and
+sets the duty cycle period to `max(measured × 1.5, 50 ms)`. The window is not a
+constant — it measured 62 ms one night and 77 ms another on the same machine —
+so deriving the period beats hardcoding it. Efficiency workers hold their
+target *and* stay on the efficiency cores.
+
+Full reasoning, including which parts are measured and which are inferred, is
+in [docs/mechanisms.md](docs/mechanisms.md).
+
+---
+
+## The pitch
+
+Every stress tester on macOS burns cycles on garbage — synthetic loops whose
+output goes to `/dev/null`. stressd runs real volunteer distributed computing
+workloads as its load source instead. Same heat, same power draw, same
+sustained pressure, except the FLOPs go to gravitational wave searches and
+prime hunts rather than nowhere.
+
+Synthetic load remains, as the fallback when no contributed work is available
+and as the precision instrument for holding an exact target.
+
+```sh
+stressd run --cpu 80          # contributed work first, synthetic tops up
+stressd run --cpu 50 --gpu 40
+stressd watch                 # live telemetry, no load
+stressd topology              # what the machine actually is
+stressd sources               # what is installed, and how to install the rest
+stressd calibrate             # sweep load, record power, emit a curve
+```
+
+Every command supports `--json`.
+
+---
+
+## What works, and how well
+
+**Duty cycle accuracy.** Three-minute runs, 1 Hz sampling, on a machine with a
+~30% baseline:
+
+| requested | worker-measured | drift over final 90 s | abandoned cycles |
+|---|---:|---:|---:|
+| 25% | 25.31% | 0.14 points | 0 |
+| 50% | 50.42% | 0.04 points | 0 |
+| 75% | 75.65% | 0.07 points | 0 |
+
+Partial load is duty cycling **inside every thread**, not fewer threads. A 50%
+target runs every core at 50%, which keeps the power curve closer to linear and
+leaves a closed-loop governor a single scalar to move.
+
+**Reads the machine, never assumes it.** `hw.nperflevels` for the number of
+core classes, handled for any N. `hw.perflevelN` for sizes and caches. The
+`hw.optional` MIB walked rather than probed, so a chip that adds `FEAT_` flags
+after this was written still reports them.
+
+**The CPU numbering trap.** `hw.perflevelN` is ordered fastest-first;
+`host_processor_info`'s logical CPU numbering is ordered efficiency-first. On
+an M3 Pro `hw.perflevel0` is "Performance" but logical CPUs 0–5 are E-cores.
+Nothing in sysctl connects them, and on parts where both levels have equal core
+counts (M1 4+4, M3 Pro 6+6) size cannot disambiguate them either. stressd
+resolves the mapping from `cluster-type` in the IORegistry device tree,
+validates it is a bijection over `0..<hw.logicalcpu`, and tells you which
+strategy produced it.
+
+**Four CPU kernels and three GPU profiles**, because "CPU load" is not one
+thing: `cpuFloat` (NEON FP64), `cpuInteger` (unpredictable branches),
+`cpuMemory` (bandwidth bound), `cpuMatrix` (Accelerate). GPU: `alu`,
+`bandwidth`, `mixed`, with the threadgroup geometry benchmarked at launch.
+
+**Contributed sources**: BOINC, Folding@home, mlucas — the last because
+Prime95's inner loops are hand-written x86 assembly and run under Rosetta on
+Apple silicon, which makes it the wrong GIMPS client here.
+
+**The mixer** holds a total target by topping contributed load up with
+synthetic load every second, with a slew limit and a deadband so it does not
+oscillate against BOINC's sharp workunit boundaries.
+
+---
+
+## Honest limits
+
+**One machine.** Every number here comes from a single MacBook Pro (`Mac15,6`,
+M3 Pro, 6P+6E) on macOS 26.6. Not a survey. See
+[docs/measurements.md](docs/measurements.md) for method and sample sizes;
+several figures are from a single run and say so.
+
+**Support matrix:**
+
+| Chip | Status |
 |---|---|
-| `stressd topology` | ✅ shipped |
-| `stressd watch` | ✅ shipped |
-| `stressd run` | ✅ shipped, synthetic load only |
-| `stressd calibrate` | ✅ shipped |
-| `stressd sources` | planned |
+| M3 Pro (6P+6E) | Real hardware. Every measurement here. |
+| M1, M2 Pro, M3 Pro, M4 Max | Topology **fixtures only** — parsing is tested, nothing was run |
+| Anything else Apple silicon | Should work. Topology is read generically, for any number of performance levels |
+| Unknown `cluster-type` | Falls back to an inferred CPU map and **says so** in `stressd topology` |
+| Intel Mac | Not supported |
 
-The sections below describe the parts that are built. The [roadmap](#roadmap)
-covers the rest.
+**GFLOPS figures are estimates**, computed from a counted FLOP-per-iteration
+figure. They are not benchmark scores and should not be compared against one.
+
+**Not validated on hardware:** the `.powerDraw` governor, live BOINC,
+Folding@home and mlucas, and a real power curve. All are implemented and
+tested against fixtures. [DEFERRED.md](DEFERRED.md) lists each one with the
+exact command to close it.
+
+**A correction.** Earlier versions of this README claimed `.userInteractive`
+biases work onto performance cores. Late measurement did not support that: six
+such threads filled cpu0–5 (the E-cores) and left the P-cores idle. What is
+verified is the *other* direction — `.background` is confined to E-cores. See
+[docs/mechanisms.md §3](docs/mechanisms.md), which also says what is still
+unresolved about it.
+
+---
+
+## Compared with stress-ng
+
+Measured with stressd's own methodology — delta over a baseline captured
+immediately before load, on a machine with a live desktop working set.
+
+`stress-ng --cpu 12` and `stressd run --cpu 100` both drive the machine to
+saturation; on a busy host neither can be distinguished from the other by total
+utilization alone.
+
+Where they differ:
+
+- **stress-ng cannot hold a partial target.** `--cpu-load 50` exists, but it is
+  a per-worker busy/idle split with no closed loop, so what you get depends on
+  what else the machine is doing. stressd measures utilization every second and
+  corrects.
+- **stress-ng has vastly more stressors** — over 300 — covering filesystem,
+  network, syscalls and much else. stressd has seven. For anything other than
+  CPU/GPU heat, use stress-ng.
+- **stress-ng is portable and mature.** stressd is macOS-only and new.
+
+If you want a general-purpose stressor, use stress-ng. stressd is for holding a
+*specific* load or wattage on Apple silicon, and for not wasting the work.
+
+---
 
 ## Install
 
 ```sh
-git clone https://github.com/zigaowang/stressd.git
+git clone https://github.com/ZigaoWang/stressd.git
 cd stressd
 swift build -c release
 cp .build/release/stressd /usr/local/bin/
 ```
 
-Requires Swift 6.0 or newer (Xcode 16+). Every command supports `--json`.
-
-## Core topology
-
-`stressd` reads the machine rather than assuming it. Nothing in the codebase
-hardcodes a chip name, a core count, or even the number of core classes.
-
-```
-$ stressd topology
-
-Machine
-  Model           Mac15,6
-  Chip            Apple M3 Pro
-  Memory          18 GiB
-  Cores           12 logical / 12 physical across 2 performance levels
-  Cache line      128 B
-  CPU index map   IORegistry device tree, clusters matched to performance levels by name
-
-Performance levels (level 0 is fastest)
-
-  Level 0  Performance
-    Cores           6 logical / 6 physical
-    Logical CPUs    6-11
-    Cache           L1i 192 KiB   L1d 128 KiB   L2 16 MiB (shared by 6)
-    QoS hint        .userInteractive
-
-  Level 1  Efficiency
-    Cores           6 logical / 6 physical
-    Logical CPUs    0-5
-    Cache           L1i 128 KiB   L1d 64 KiB   L2 4 MiB (shared by 6)
-    QoS hint        .background
-
-CPU features (53 present of 82 reported)
-  AdvSIMD            AdvSIMD_HPFPCvt    arm64              armv8_1_atomics
-  ...
-```
-
-Sources:
-
-- `hw.nperflevels` for the number of core classes, handled generically — the
-  code does not assume there are two.
-- `hw.perflevelN.{name,logicalcpu,physicalcpu,l1icachesize,l1dcachesize,l2cachesize,cpusperl2}`
-  for each class.
-- `hw.optional.*` for architectural features, enumerated by walking the sysctl
-  MIB rather than probing a hardcoded list, so a chip that adds `FEAT_` flags
-  after this was written still reports them.
-- The IORegistry device tree at `IODeviceTree:/cpus` for the logical CPU
-  numbers belonging to each class.
-
-### Why the device tree, and the trap it avoids
-
-`hw.perflevelN` is ordered **fastest first**: `hw.perflevel0` is the
-Performance level. The Mach logical CPU numbering used by
-`host_processor_info` — and therefore by every per-core reading `stressd`
-takes — is ordered the other way, **efficiency cores first**.
-
-On an M3 Pro, `hw.perflevel0` is "Performance", but logical CPUs 0–5 are the
-E-cores and 6–11 are the P-cores. Nothing in sysctl connects the two
-numberings, and on parts where both levels have the same core count (M1, M3
-Pro) you cannot even disambiguate them by size. Get it backwards and every
-per-core utilization figure is silently attributed to the wrong core class.
-
-So `stressd` resolves the mapping from `cluster-type` in the device tree, and
-tells you which strategy produced it:
-
-| Source | Meaning |
-|---|---|
-| `ioRegistryByClusterName` | Cluster type letter matched the level name (`P` → Performance) |
-| `ioRegistryByCoreCount` | Cluster sizes were unambiguous |
-| `ioRegistryByClusterOrder` | Matched by cluster ordering |
-| `inferred` | No usable device tree data; see below |
-
-Only the last one is an assumption, and it says so.
-
-Whichever strategy wins, the result is validated as a bijection before it is
-accepted: every logical CPU number from `0` to `hw.logicalcpu - 1` must appear
-exactly once. Per-core telemetry indexes arrays by logical CPU number, so a map
-that duplicates or omits an index is worse than no map at all. A map that fails
-validation is discarded in favour of the inferred layout.
-
-### What `inferred` assumes
-
-The inferred layout is used when the IORegistry cannot be read, when it reports
-a `cluster-type` other than `P` or `E`, when the number of clusters does not
-equal the number of performance levels, or when the resulting map fails
-validation. It assumes:
-
-1. **Logical CPU numbers are assigned slowest class first.** The last
-   performance level (the slowest, highest `N` in `hw.perflevelN`) owns logical
-   CPUs starting at 0; the fastest level owns the highest numbers. This holds on
-   every Apple silicon part shipped to date but is not documented by Apple and
-   is not contractual.
-2. **Each performance level occupies one contiguous run of logical CPU
-   numbers**, laid out in `hw.perflevelN` order.
-3. **Logical CPU numbers start at 0 and are dense.**
-
-The layout is allocated from 0 upwards and clamped to `hw.logicalcpu`, so it can
-never duplicate a CPU number or name one that does not exist. If the level sizes
-do not add up, the tail is left unmapped rather than misattributed: incomplete
-coverage is a safe failure, wrong coverage is not.
-
-Assumption 1 is the one that matters. If it is ever wrong, `stressd` will label
-P-core load as E-core load and vice versa — which is precisely why the device
-tree is consulted first, and why `stressd topology` prints which source it
-used. If yours says `inferred`, the numbers are still usable but the
-Performance / Efficiency labels are an educated guess.
-
-### QoS is a hint, not affinity
-
-macOS has **no public API for pinning a thread to a core class.** There is no
-`pthread_setaffinity_np`, and `thread_policy_set` with an affinity tag is a
-no-op on Apple silicon.
-
-What `stressd` has is QoS, which biases the scheduler: `.userInteractive`
-prefers P-cores, and `.background` is confined to E-cores. Neither is a
-guarantee, and the scheduler is free to move work at any moment — under
-thermal pressure or on battery it routinely does.
-
-`stressd` treats this honestly. Wherever it acts on a placement hint, it also
-reports the **observed** per-core utilization next to the **requested**
-placement, so the gap between what was asked for and what happened is visible
-rather than assumed away.
-
-## Load
-
-```
-stressd run --cpu 50                    # every core at 50% duty
-stressd run --cpu 100 --duration 30m
-stressd run --cpu 75 --level efficiency
-stressd watch                           # live telemetry, applies no load
-```
-
-Only the synthetic source exists so far, so every run is synthetic today.
-Contributed sources arrive in a later step and will become the default.
-
-### Partial load is duty cycling, not fewer threads
-
-`--cpu 50` runs **every** core at a 50% duty cycle. It does not run half the
-cores flat out. Spreading the load keeps the power curve close to linear and
-leaves the closed-loop governor a single scalar to move, which is what makes
-the later wattage target tractable.
-
-Each worker alternates work and sleep on a 5 ms period. Two things make that
-hold a target rather than drift:
-
-- **The cycle boundary is anchored** at `anchor + n * period`, never at "now
-  plus a bit". That fixes the *denominator*: after `n` cycles exactly
-  `n * period` has elapsed. Repeated relative sleeps compound their jitter
-  instead, and the average walks away from the target over minutes.
-- **The work quantum is a debt, measured from arrival.** That fixes the
-  *numerator*, and it is not optional: `mach_wait_until` reliably *over*sleeps,
-  so a worker routinely arrives at a cycle already late. An earlier version
-  measured the work window from the grid start, which silently handed that
-  oversleep back as lost work — and because oversleep is one-sided, the loss
-  was a systematic undershoot rather than noise. A 25% request measured 10%.
-
-Measured on an M3 Pro, three minutes per point, sampling once a second:
-
-| requested | worker-measured | drift over the final 90 s | cycles abandoned |
-|---|---|---|---|
-| 25% | 25.31% | 0.14 points | 0 |
-| 50% | 50.42% | 0.04 points | 0 |
-| 75% | 75.65% | 0.07 points | 0 |
-
-"Worker-measured" is busy time over elapsed time, recorded inside the worker
-loops. It is the honest measure of the duty cycler because it excludes
-whatever else the machine is doing. `stressd run` reports it beside the
-system-wide figure from `host_processor_info`, and the gap between them is the
-rest of your machine.
-
-### Timer coalescing, and a tradeoff you should know about
-
-macOS coalesces timer wake-ups to save power, and how aggressively depends on
-the thread's QoS class. Median overshoot on a requested 2.5 ms sleep, M3 Pro:
-
-| QoS | default | latency tier 0 |
-|---|---:|---:|
-| `.userInteractive` | 638 µs | 325 µs |
-| `.utility` | 7654 µs | 324 µs |
-| `.background` | 77635 µs | 329 µs |
-
-A 5 ms duty cycle cannot survive a 77 ms overshoot. That is what a
-`.background` worker was really doing: 2.5 ms of work then an 80 ms sleep,
-about 3% duty against a 50% request. Since `.background` is the hint that
-biases work onto efficiency cores, half the pool was affected and the whole
-machine measured roughly half of target.
-
-`THREAD_LATENCY_QOS_POLICY` at tier 0 fixes the timing — but it also lifts the
-thread off the efficiency cores. Six `.background` threads at 50% duty:
-
-| latency tier | overshoot | E-cores | P-cores |
-|---|---:|---:|---:|
-| default | 76880 µs | 58% | 14% |
-| tier 0 | 324 µs | 46% | 62% |
-| tier 1 | 629 µs | 50% | 71% |
-| tier 2 | 1253 µs | 41% | 57% |
-| tier 3 | 8857 µs | 60% | 30% |
-
-Every tier precise enough for a 5 ms period also promotes the thread. There is
-no setting that gives both, so `stressd` asks for low latency only when it
-needs it — when the worker sleeps at all, and when its QoS class coalesces
-badly. **A worker at 100% duty never sleeps, so it keeps the default tier and
-stays exactly where the QoS class puts it.**
-
-```
-$ stressd run --cpu 100 --level efficiency
-      requested Efficiency via .background   ->   observed Performance 10.7%, Efficiency 100.0%
-
-$ stressd run --cpu 50 --level efficiency
-      requested Efficiency via .background   ->   observed Performance 40.8%, Efficiency  47.4%
-      placement relaxed: low latency timers are needed below 100% duty,
-      and they lift threads off the efficiency cores. See README.
-```
-
-Reproduce both tables with `swift Tools/measure-timer-coalescing.swift`.
-
-### The compute is real
-
-The synthetic worker runs dense FP64 that survives `-O`, because a stress
-tester whose loop got optimised away is a stress tester that measures nothing.
-Seven independent pairs advance by a symplectic rotation, `x -= s*y; y += s*x`.
-The map has unit determinant and a trace strictly inside `(-2, 2)`, so the
-state orbits forever: bounded for any iteration count, no overflow, no
-denormals, and — unlike a contraction — never settling on a constant the
-hardware could coast through.
-
-Two checks, both in the test suite and both re-runnable by hand:
-
-```sh
-# 1. Wall time scales with the iteration count. A folded loop would be flat.
-swift test -c release --filter "scales linearly"
-
-# 2. The FMAs are really there, inside a backward branch.
-swift build -c release
-otool -tV -p '_$s9StressKit14CPUFloatKernelV3run10iterationsySi_tF' \
-  .build/release/stressd | grep -c 'fmla.2d'   # 28, with no mov.16b between them
-```
-
-## Measured against a busy machine, on purpose
-
-Most benchmarking tools assume a quiet machine and quietly produce nonsense on
-a real one. `stressd` assumes the opposite. The machine it was developed on
-idles around 30% busy — WindowServer, Spotlight, a browser, Figma — and that is
-treated as the normal case, not an anomaly to apologise for.
-
-Concretely:
-
-- **`run` measures a baseline before it starts** and reports observed load as
-  both an absolute and a delta over that baseline.
-- **`calibrate` captures baseline utilization and power at its 0% point** and
-  subtracts them from every measurement, and warns when the baseline is above
-  15%, where curve quality starts to suffer.
-- **Every worker measures its own duty cycle** from inside its loop. That
-  figure excludes everything else on the machine and is the one to trust when
-  the absolute number looks high.
-
-Verified against `top` on a loaded machine: idle 68.0% vs top's 69.4%, user
-18.5% vs 18.1%, system 13.0% vs 12.3%; and under a 50% load, 62.5/12.5/25.0
-against top's 61.5/12.1/26.4. Every sample also asserts that user + system +
-nice + idle sums to exactly 1, so a dropped or double-counted bucket cannot
-silently invert the numbers.
-
-## Power and battery
-
-```
-stressd watch          # includes battery draw, package power when available
-stressd calibrate      # sweeps load and records power at each point
-```
-
-Battery telemetry comes from IOKit directly — `IOPSCopyPowerSourcesInfo` for
-the user-visible view and the `AppleSmartBattery` IORegistry node for the raw
-numbers. Not `pmset`, which is this same data formatted as English and then
-parsed back out.
-
-```
-  Power
-    battery 25%   raw 24.0%   charging   274 cycles   30.9 C
-    charging  39.51 W   (median of 5: 39.51 W)
-    package      unavailable: powermetrics needs root; re-run with sudo for package power
-```
-
-Details that matter:
-
-- **Negative watts means discharging.** The convention follows
-  `InstantAmperage` and is asserted in the test suite in both directions.
-- **`InstantAmperage` is signed, but not always encoded that way.** On some
-  firmware a discharge of −6692 mA arrives as the 64-bit unsigned
-  18446744073709544924, where reading it as `Int64` restores the sign for free.
-  On others the same current arrives as the 32-bit-widened 4294960604, which is
-  a large *positive* number and needs 2³² subtracted. Both encodings are
-  detected and tested; this machine's own `MaximumDischargeCurrent` holds an
-  example of the first.
-- **The percentage the OS shows you is smoothed and the raw one is not.** Both
-  are reported, labelled, and they will disagree — 25% versus 24.0% above.
-- **`InstantAmperage` is noisy sample to sample**, so a 5-sample rolling median
-  is reported alongside the raw value. A control loop should close on the
-  median; a single spike must not move it.
-
-Package power needs root, so it is **never required**. Without it every power
-field reads `nil`, the tool works normally, and it tells you why rather than
-showing a blank. When available, `powermetrics` runs as a single long-lived
-subprocess streaming `-f plist`, parsed with `PropertyListSerialization` — one
-process per sample would cost hundreds of milliseconds of startup and perturb
-the very thing being measured.
-
-On battery, system draw minus package draw is reported as **other**: the
-display, radios, and storage.
-
-## The power curve
-
-```
-stressd calibrate                          # 0-100% in steps of 10
-stressd calibrate --points 0,25,50,75,100 --dwell 90s
-stressd calibrate --json > curve.json
-stressd calibrate --output-path curve.csv
-```
-
-Run it on battery. On AC the only available figure is SoC package power, which
-misses the display and everything else, so `calibrate` refuses unless you pass
-`--allow-ac`.
-
-**The methodology is the point here, more than the code.**
-
-- **The sweep order is randomised.** A monotonic 0→100% sweep conflates load
-  with accumulated heat: the 90% point would be measured on a machine that has
-  been hot for ten minutes and would read low from throttling, bending the
-  curve in a way that is an artefact of the sweep rather than a property of the
-  chip. The shuffle is seeded, so a sweep is reproducible.
-- **Each point gets a cooldown**, gated on `thermalState` returning to
-  `.nominal` or a fixed floor, whichever is longer, with a cap so a machine that
-  never cools cannot hang the sweep.
-- **A settling window after each change is discarded** before averaging starts.
-  Power does not step instantaneously and neither does core frequency.
-- **Thermal state is recorded per point**, and any point not measured entirely
-  at `.nominal` is flagged as suspect in the output.
-- **A baseline is subtracted from everything**, so the curve measures stressd's
-  load rather than your browser tabs.
-
-The curve is cached at `~/.config/stressd/power-curve.json` so the power
-governor can seed itself from it instead of learning cold.
-
-The interesting derived number is **watts per percentage point of load**. If it
-is flat, power scales linearly with load; where it steps is the efficiency
-knee.
+Requires Swift 6.0+ (Xcode 16+).
 
 ## Safety
 
 Sustained full load on a Mac is a real thermal event, not a benchmark run.
 
-- `stressd` backs off automatically at `ProcessInfo.ThermalState.serious` and
-  stops entirely at `.critical`. This is a hard override and is not
-  configurable.
-- Fanless Macs (MacBook Air, base Mac mini) will hit thermal limits and stay
-  there. Sustained maximum load on a passively cooled machine is not something
-  to leave running unattended.
-- Every source snapshots the state it modifies and restores it on exit,
-  including on `SIGINT`, `SIGTERM`, and unexpected termination. If a BOINC or
-  Folding@home client was already running before `stressd` started, it is left
-  running afterwards.
-- `stressd` never requires `sudo`. Package power telemetry is richer when it
-  has elevated privileges, and simply reports `nil` when it does not.
+- stressd backs off at `ProcessInfo.ThermalState.serious` and stops at
+  `.critical`. **This is a hard override and is not configurable.** A stress
+  tester that lets you disable its own thermal protection is one that cooks a
+  laptop.
+- Fanless Macs will reach thermal limits and stay there.
+- Every source snapshots what it modifies and restores it on exit, including
+  `SIGINT`, `SIGTERM`, and an unclean kill — BOINC's `global_prefs_override.xml`
+  is journalled to disk before it is touched, and repaired on the next launch.
+- stressd never requires `sudo`. Package power is richer with it and simply
+  `nil` without it.
 
-## Roadmap
+## Documentation
 
-In build order:
+- [docs/mechanisms.md](docs/mechanisms.md) — how it works, and what is verified
+  versus inferred
+- [docs/measurements.md](docs/measurements.md) — every empirical claim, with
+  method and sample size
+- [DEFERRED.md](DEFERRED.md) — what is not yet validated on hardware
+- [CONTRIBUTING.md](CONTRIBUTING.md) — adding a `LoadSource` or a `WorkerKind`
+- [Examples/](Examples) — a 30-line program that starts load and stops cleanly
 
-1. ✅ Package scaffold, `CoreTopology`, `stressd topology`
-2. ✅ `SyntheticSource` with duty-cycled CPU workers, per-core telemetry, `stressd watch`
-3. ✅ Battery and power telemetry, `stressd calibrate`
-4. `BOINCSource` and the synthetic top-up mixing logic
-5. Power governor with a wattage target
-6. Metal GPU worker
-7. `FoldingSource`, `MlucasSource`, remaining worker kinds
+## Provenance
 
-### Planned load sources
-
-**BOINC** (primary) — wraps `boinccmd`. Recommended projects:
-[Einstein@Home](https://einsteinathome.org) (gravitational wave and pulsar
-searches) and [PrimeGrid](https://primegrid.com) (prime number searches). Both
-have native Apple silicon applications, including GPU apps.
-
-**Folding@home** — wraps `fah-client` v8 over its localhost WebSocket API.
-
-**GIMPS via mlucas** — note that Prime95/mprime is hand-written x86 assembly
-and runs badly under Rosetta, which makes it useless as a load source here.
-[mlucas](https://www.mersenneforum.org/mayer/README.html) is the correct GIMPS
-client on Apple silicon.
-
-**Synthetic** — the fallback and the precision instrument. Partial load is
-implemented as duty cycling *inside every thread*, not by running fewer threads
-than there are cores: a 50% target spreads across all cores rather than pinning
-half of them, which gives a far more linear power curve and is much easier to
-hold in a closed loop.
-
-## Architecture
-
-```
-StressKit   library, all logic, no CLI code and no print statements
-stressd     thin CLI wrapper
-```
-
-A SwiftUI menu bar app will link against `StressKit` later, so the library
-stays free of any presentation concerns. `swift-argument-parser` is the only
-dependency, and only the executable target sees it.
-
-Everything that touches the system — sysctl, the IORegistry, subprocesses —
-sits behind a protocol so the test suite runs against recorded fixtures from
-machines that are not the one running the tests. `swift test` passes on any
-Mac; the handful of tests that need real hardware skip themselves elsewhere.
-
-## Contributing
-
-```sh
-swift build
-swift test
-swift format lint --recursive --strict Sources Tests Package.swift
-```
-
-CI runs all three on `macos-latest`, plus a release build, because the
-synthetic workers are only meaningful when they survive optimisation.
+The code was substantially written with Claude Code. The design decisions,
+the measurements, and the validation are mine.
 
 ## License
 

@@ -69,9 +69,14 @@ public struct GPUWorkerSample: Sendable, Codable, Equatable {
 /// batch length sets the granularity of control.
 public final class MetalGPUWorker: @unchecked Sendable {
 
-  /// Target length of one dispatch batch. Long enough that submission overhead
-  /// is small, short enough that the duty cycle stays controllable.
-  private static let batchTargetNanoseconds: UInt64 = 20_000_000
+  /// Target length of one dispatch batch.
+  ///
+  /// This sets the granularity of duty cycle control: a dispatch cannot be cut
+  /// short once submitted, so the last batch of a cycle can overrun the work
+  /// deadline by up to one batch. At 10 ms against a 200 ms period that is a
+  /// 5% worst-case error, which is why the GPU duty tolerance is wider than
+  /// the CPU's.
+  private static let batchTargetNanoseconds: UInt64 = 10_000_000
 
   /// Duty cycle period. Longer than the CPU worker's because a GPU dispatch
   /// cannot be cut short once submitted.
