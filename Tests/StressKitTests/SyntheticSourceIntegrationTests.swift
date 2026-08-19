@@ -69,12 +69,16 @@ struct SyntheticSourceIntegrationTests {
 
   /// How much of the requested load must show up as a utilization delta.
   ///
-  /// Not 100%: stressd's threads compete with the machine's existing work
-  /// rather than stacking on top of it, so some of the requested load displaces
-  /// what was already running instead of adding to it. The busier the host, the
-  /// more displacement. Two thirds is comfortably above what a broken duty
-  /// cycler would produce while tolerating a loaded machine.
-  private static let minimumDeltaFraction = 0.66
+  /// Not 100%, and deliberately generous. stressd's threads compete with the
+  /// machine's existing work rather than stacking on top of it, so part of the
+  /// requested load displaces what was already running instead of adding to it.
+  /// The effect is proportionally largest at low targets on a busy host: a 25%
+  /// request measured a 15% delta against a 45% baseline here.
+  ///
+  /// This is a sanity floor, not the regression detector. The tight assertion
+  /// in every one of these tests is the worker-measured duty cycle, which is
+  /// recorded inside the worker loops and owes nothing to what else is running.
+  private static let minimumDeltaFraction = 0.5
 
   @Test("Ten seconds at 50% holds close to 50%", .timeLimit(.minutes(2)))
   func holdsFiftyPercent() async throws {
