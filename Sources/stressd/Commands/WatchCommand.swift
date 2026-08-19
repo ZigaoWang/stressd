@@ -32,7 +32,7 @@ struct WatchCommand: AsyncParsableCommand {
     let renderer = InPlaceRenderer()
     CleanupRegistry.shared.register("restore cursor") { renderer.finish() }
 
-    let monitor = TelemetryMonitor(topology: topology, interval: interval)
+    let monitor = TelemetryMonitor(topology: topology, interval: interval, power: PowerMonitor())
     let emitJSON = output.json
 
     let work = Task {

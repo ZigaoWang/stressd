@@ -6,7 +6,9 @@ enum TelemetryRenderer {
 
   /// Full frame: per-core bars, per-level aggregates, and — when load is
   /// running — requested duty cycle beside observed utilization.
-  static func frame(_ telemetry: Telemetry, topology: CoreTopology, width: Int) -> [String] {
+  static func frame(
+    _ telemetry: Telemetry, topology: CoreTopology, width: Int, baseline: Double? = nil
+  ) -> [String] {
     var lines: [String] = []
     lines.append(header(telemetry, topology: topology))
     lines.append("")
@@ -14,10 +16,64 @@ enum TelemetryRenderer {
     lines.append("")
     lines.append(contentsOf: byLevel(telemetry))
 
+    lines.append("")
+    lines.append(contentsOf: powerSection(telemetry))
+
     let sources = telemetry.activeSources.filter { $0.state == .running }
     if !sources.isEmpty {
       lines.append("")
-      lines.append(contentsOf: load(sources, telemetry: telemetry))
+      lines.append(contentsOf: load(sources, telemetry: telemetry, baseline: baseline))
+    }
+    return lines
+  }
+
+  /// Battery and package power, or an explanation of why they are missing.
+  static func powerSection(_ telemetry: Telemetry) -> [String] {
+    var lines = ["  Power"]
+
+    if let percent = telemetry.batteryPercent {
+      var parts = [String(format: "    battery %.0f%%", percent)]
+      if let raw = telemetry.batteryRawPercent {
+        // The OS smooths the user-visible figure, so the two disagree. Both
+        // are shown rather than picking one and being quietly wrong.
+        parts.append(String(format: "raw %.1f%%", raw))
+      }
+      if telemetry.isConnectedToPower == true {
+        parts.append(telemetry.isCharging == true ? "charging" : "on AC")
+      } else {
+        parts.append("on battery")
+      }
+      if let cycles = telemetry.cycleCount { parts.append("\(cycles) cycles") }
+      if let temperature = telemetry.batteryTemperatureCelsius {
+        parts.append(String(format: "%.1f C", temperature))
+      }
+      lines.append(parts.joined(separator: "   "))
+    } else {
+      lines.append("    battery      not present")
+    }
+
+    if let watts = telemetry.batteryWatts {
+      // Sign convention: negative is discharging. Rendered as a direction so
+      // nobody has to remember which way round it is.
+      let direction = watts < 0 ? "discharging" : "charging"
+      var line = String(format: "    %@  %.2f W", direction, abs(watts))
+      if let smoothed = telemetry.batterySmoothedWatts {
+        line += String(format: "   (median of 5: %.2f W)", abs(smoothed))
+      }
+      lines.append(line)
+    }
+
+    if let package = telemetry.packagePowerWatts {
+      var parts = [String(format: "    package %.2f W", package)]
+      if let gpu = telemetry.gpuPowerWatts { parts.append(String(format: "gpu %.2f W", gpu)) }
+      if let other = telemetry.otherPowerWatts {
+        parts.append(String(format: "other %.2f W", other))
+      }
+      lines.append(parts.joined(separator: "   "))
+    } else if let reason = telemetry.powerAvailability, reason != "available" {
+      lines.append("    package      unavailable: \(reason)")
+    } else {
+      lines.append("    package      unavailable: run with sudo for package power")
     }
     return lines
   }
@@ -87,7 +143,9 @@ enum TelemetryRenderer {
     }
   }
 
-  private static func load(_ sources: [SourceStatus], telemetry: Telemetry) -> [String] {
+  private static func load(
+    _ sources: [SourceStatus], telemetry: Telemetry, baseline: Double?
+  ) -> [String] {
     var lines = ["  Load"]
     for source in sources {
       var parts = ["    \(source.sourceID)"]
@@ -96,6 +154,12 @@ enum TelemetryRenderer {
         parts.append("worker-measured \(percent(achieved))")
       }
       parts.append("observed \(percent(telemetry.cpu.systemWide))")
+      if let baseline {
+        // On a machine with a real working set the absolute figure is mostly
+        // other people's work. The delta over baseline is stressd's share.
+        parts.append(
+          "delta \(percent(max(0, telemetry.cpu.systemWide - baseline)))")
+      }
       parts.append("\(source.threadCount) threads")
       lines.append(parts.joined(separator: "   "))
 

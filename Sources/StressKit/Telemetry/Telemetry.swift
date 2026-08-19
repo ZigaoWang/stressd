@@ -11,13 +11,49 @@ public struct Telemetry: Sendable, Codable {
   public let cpu: CPUSample
   public let thermalState: ThermalState
   public let gpuUtilization: Double?
+
+  // MARK: Power. All optional: package power needs root and is never required,
+  // and a desktop has no battery.
+
+  /// CPU package power from powermetrics.
   public let packagePowerWatts: Double?
+  public let gpuPowerWatts: Double?
+  /// System draw minus package draw: display, radios, storage, everything
+  /// else. Only derivable on battery, where battery watts measure the whole
+  /// machine rather than just the SoC.
+  public let otherPowerWatts: Double?
+  /// Why package power is missing, when it is.
+  public let powerAvailability: String?
+
+  /// The percentage the OS shows the user. Smoothed.
   public let batteryPercent: Double?
+  /// Raw capacity over raw max capacity. The true state of charge, and it will
+  /// disagree with `batteryPercent`.
+  public let batteryRawPercent: Double?
+  /// Instantaneous battery power. **Negative means discharging.**
   public let batteryWatts: Double?
+  /// Rolling median of `batteryWatts`, which is noisy sample to sample. This
+  /// is the one to close a control loop on.
+  public let batterySmoothedWatts: Double?
+  public let isCharging: Bool?
+  public let isConnectedToPower: Bool?
+  public let cycleCount: Int?
+  public let batteryTemperatureCelsius: Double?
   /// Fraction of the current load that is real contributed work, `0...1`.
   /// Zero while the synthetic source is the only one running.
   public let contributedFraction: Double
   public let activeSources: [SourceStatus]
+
+  /// Total system draw while on battery, as a positive number of watts.
+  ///
+  /// Only meaningful on battery. On AC the battery is charging or idle and
+  /// says nothing about what the machine is consuming.
+  public var systemDrawWatts: Double? {
+    guard isConnectedToPower == false, let watts = batterySmoothedWatts ?? batteryWatts,
+      watts < 0
+    else { return nil }
+    return -watts
+  }
 
   public init(
     timestamp: Date,
@@ -26,8 +62,17 @@ public struct Telemetry: Sendable, Codable {
     thermalState: ThermalState,
     gpuUtilization: Double? = nil,
     packagePowerWatts: Double? = nil,
+    gpuPowerWatts: Double? = nil,
+    otherPowerWatts: Double? = nil,
+    powerAvailability: String? = nil,
     batteryPercent: Double? = nil,
+    batteryRawPercent: Double? = nil,
     batteryWatts: Double? = nil,
+    batterySmoothedWatts: Double? = nil,
+    isCharging: Bool? = nil,
+    isConnectedToPower: Bool? = nil,
+    cycleCount: Int? = nil,
+    batteryTemperatureCelsius: Double? = nil,
     contributedFraction: Double = 0,
     activeSources: [SourceStatus] = []
   ) {
@@ -37,8 +82,17 @@ public struct Telemetry: Sendable, Codable {
     self.thermalState = thermalState
     self.gpuUtilization = gpuUtilization
     self.packagePowerWatts = packagePowerWatts
+    self.gpuPowerWatts = gpuPowerWatts
+    self.otherPowerWatts = otherPowerWatts
+    self.powerAvailability = powerAvailability
     self.batteryPercent = batteryPercent
+    self.batteryRawPercent = batteryRawPercent
     self.batteryWatts = batteryWatts
+    self.batterySmoothedWatts = batterySmoothedWatts
+    self.isCharging = isCharging
+    self.isConnectedToPower = isConnectedToPower
+    self.cycleCount = cycleCount
+    self.batteryTemperatureCelsius = batteryTemperatureCelsius
     self.contributedFraction = contributedFraction
     self.activeSources = activeSources
   }
