@@ -15,6 +15,7 @@ struct Stressd: AsyncParsableCommand {
     subcommands: [
       RunCommand.self,
       WatchCommand.self,
+      CalibrateCommand.self,
       TopologyCommand.self,
     ]
   )
