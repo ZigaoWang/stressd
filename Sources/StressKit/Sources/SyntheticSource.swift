@@ -41,9 +41,9 @@ public actor SyntheticSource: LoadSource {
   private let clock: any MonotonicClock
   private nonisolated let box = PoolBox()
 
-  /// - Parameter periodNanoseconds: Overrides the per-level duty cycle period.
-  ///   Leave `nil` to let each performance level use the period its QoS class
-  ///   needs.
+  /// Passing a `periodNanoseconds` overrides the per-level duty cycle period.
+  /// Leave it `nil` to let each performance level use the period its QoS class
+  /// needs.
   public init(
     topology: CoreTopology,
     periodNanoseconds: UInt64? = nil,

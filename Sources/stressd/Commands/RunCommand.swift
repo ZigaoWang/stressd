@@ -49,6 +49,14 @@ struct RunCommand: AsyncParsableCommand {
   @Option(name: .long, help: "Seconds between telemetry samples.")
   var interval: Double = TelemetryMonitor.defaultInterval
 
+  @Option(
+    name: .long,
+    help: """
+      Seconds spent measuring the machine's existing load before starting, so \
+      observed utilization can be reported as a delta. Set 0 to skip.
+      """)
+  var baselineSeconds: Double = 3
+
   func validate() throws {
     guard cpu >= 0, cpu <= 100 else {
       throw ValidationError("--cpu must be between 0 and 100")
@@ -84,9 +92,16 @@ struct RunCommand: AsyncParsableCommand {
     let renderer = InPlaceRenderer()
     CleanupRegistry.shared.register("restore cursor") { renderer.finish() }
 
+    // Measured before the workers spawn. This machine is not idle, and an
+    // absolute utilization figure on a busy desktop says more about the
+    // browser than about stressd.
+    let baseline = try await Self.measureBaseline(
+      topology: topology, seconds: baselineSeconds, json: output.json)
+
     try await source.start(budget: budget)
 
-    let monitor = TelemetryMonitor(topology: topology, interval: interval)
+    let monitor = TelemetryMonitor(
+      topology: topology, interval: interval, power: PowerMonitor())
     await monitor.observe([source])
     let emitJSON = output.json
 
@@ -96,7 +111,8 @@ struct RunCommand: AsyncParsableCommand {
           print(try JSONReport.encodeLine(telemetry))
         } else {
           renderer.render(
-            TelemetryRenderer.frame(telemetry, topology: topology, width: Terminal.columns))
+            TelemetryRenderer.frame(
+              telemetry, topology: topology, width: Terminal.columns, baseline: baseline))
         }
         // Thermal back-off belongs here, between reading the state and the next
         // adjust(). It arrives with the governor in a later step; today the
@@ -115,11 +131,29 @@ struct RunCommand: AsyncParsableCommand {
     CleanupRegistry.shared.run()
 
     if !emitJSON {
-      print(Self.summary(status: finalStatus, elapsed: Date().timeIntervalSince(startedAt)))
+      print(
+        Self.summary(
+          status: finalStatus, elapsed: Date().timeIntervalSince(startedAt),
+          baseline: baseline))
     }
   }
 
   // MARK: - Helpers
+
+  /// Samples utilization with no stressd load running.
+  static func measureBaseline(
+    topology: CoreTopology, seconds: Double, json: Bool
+  ) async throws
+    -> Double?
+  {
+    guard seconds > 0 else { return nil }
+    if !json {
+      print("Measuring baseline load for \(Int(seconds))s...")
+    }
+    let sampler = try CPUUtilizationSampler(topology: topology)
+    try await Task.sleep(for: .seconds(seconds))
+    return try await sampler.sample()?.systemWide
+  }
 
   /// Resolves `--level` against the machine's actual performance levels rather
   /// than a hardcoded two-level assumption.
@@ -147,7 +181,11 @@ struct RunCommand: AsyncParsableCommand {
     throw ValidationError("unknown level '\(level)'. This machine has: all, \(available)")
   }
 
-  static func summary(status: SourceStatus, elapsed: TimeInterval) -> String {
+  static func summary(
+    status: SourceStatus, elapsed: TimeInterval, baseline: Double?
+  )
+    -> String
+  {
     var lines = ["", "Session"]
     lines.append(Formatting.field("  Duration", DurationParser.format(elapsed), keyWidth: 20))
     lines.append(
@@ -157,6 +195,11 @@ struct RunCommand: AsyncParsableCommand {
       lines.append(
         Formatting.field(
           "  Worker-measured", TelemetryRenderer.percent(achieved), keyWidth: 20))
+    }
+    if let baseline {
+      lines.append(
+        Formatting.field(
+          "  Baseline load", TelemetryRenderer.percent(baseline), keyWidth: 20))
     }
     lines.append(Formatting.field("  Threads", "\(status.threadCount)", keyWidth: 20))
     if let gflops = status.detail["gflops"] {
