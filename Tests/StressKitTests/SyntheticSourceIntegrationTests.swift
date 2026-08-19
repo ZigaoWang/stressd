@@ -5,12 +5,24 @@ import Testing
 
 /// Whether the load-generating tests should run.
 enum IntegrationTests {
+  /// True when a sanitizer is instrumenting this process.
+  ///
+  /// ThreadSanitizer slows the compute kernels by roughly an order of
+  /// magnitude, so a worker asked for 50% duty cannot deliver it and the
+  /// measured utilization says nothing about the duty cycler. The scheduling
+  /// and lifecycle tests still run and are exactly what TSan should see; only
+  /// the assertions about achieved load magnitude are skipped.
+  static var isSanitizerActive: Bool {
+    dlsym(UnsafeMutableRawPointer(bitPattern: -2), "__tsan_init") != nil
+      || dlsym(UnsafeMutableRawPointer(bitPattern: -2), "__asan_init") != nil
+  }
+
   /// These put the machine under real load for tens of seconds and assert on
   /// observed utilization, so they are meaningless on a busy or virtualised
   /// runner. Enabled by default because the duty cycler is the thing most worth
   /// checking locally; CI sets the variable to skip them.
   static var isEnabled: Bool {
-    guard TestHost.isAppleSilicon else { return false }
+    guard TestHost.isAppleSilicon, !isSanitizerActive else { return false }
     return ProcessInfo.processInfo.environment["STRESSD_SKIP_INTEGRATION_TESTS"] == nil
   }
 }
