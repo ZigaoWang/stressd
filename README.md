@@ -25,7 +25,7 @@ Under construction, built in stages. What exists today:
 | `stressd topology` | ✅ shipped |
 | `stressd watch` | ✅ shipped |
 | `stressd run` | ✅ shipped, synthetic load only |
-| `stressd calibrate` | planned |
+| `stressd calibrate` | ✅ shipped |
 | `stressd sources` | planned |
 
 The sections below describe the parts that are built. The [roadmap](#roadmap)
@@ -278,6 +278,113 @@ otool -tV -p '_$s9StressKit14CPUFloatKernelV3run10iterationsySi_tF' \
   .build/release/stressd | grep -c 'fmla.2d'   # 28, with no mov.16b between them
 ```
 
+## Measured against a busy machine, on purpose
+
+Most benchmarking tools assume a quiet machine and quietly produce nonsense on
+a real one. `stressd` assumes the opposite. The machine it was developed on
+idles around 30% busy — WindowServer, Spotlight, a browser, Figma — and that is
+treated as the normal case, not an anomaly to apologise for.
+
+Concretely:
+
+- **`run` measures a baseline before it starts** and reports observed load as
+  both an absolute and a delta over that baseline.
+- **`calibrate` captures baseline utilization and power at its 0% point** and
+  subtracts them from every measurement, and warns when the baseline is above
+  15%, where curve quality starts to suffer.
+- **Every worker measures its own duty cycle** from inside its loop. That
+  figure excludes everything else on the machine and is the one to trust when
+  the absolute number looks high.
+
+Verified against `top` on a loaded machine: idle 68.0% vs top's 69.4%, user
+18.5% vs 18.1%, system 13.0% vs 12.3%; and under a 50% load, 62.5/12.5/25.0
+against top's 61.5/12.1/26.4. Every sample also asserts that user + system +
+nice + idle sums to exactly 1, so a dropped or double-counted bucket cannot
+silently invert the numbers.
+
+## Power and battery
+
+```
+stressd watch          # includes battery draw, package power when available
+stressd calibrate      # sweeps load and records power at each point
+```
+
+Battery telemetry comes from IOKit directly — `IOPSCopyPowerSourcesInfo` for
+the user-visible view and the `AppleSmartBattery` IORegistry node for the raw
+numbers. Not `pmset`, which is this same data formatted as English and then
+parsed back out.
+
+```
+  Power
+    battery 25%   raw 24.0%   charging   274 cycles   30.9 C
+    charging  39.51 W   (median of 5: 39.51 W)
+    package      unavailable: powermetrics needs root; re-run with sudo for package power
+```
+
+Details that matter:
+
+- **Negative watts means discharging.** The convention follows
+  `InstantAmperage` and is asserted in the test suite in both directions.
+- **`InstantAmperage` is signed, but not always encoded that way.** On some
+  firmware a discharge of −6692 mA arrives as the 64-bit unsigned
+  18446744073709544924, where reading it as `Int64` restores the sign for free.
+  On others the same current arrives as the 32-bit-widened 4294960604, which is
+  a large *positive* number and needs 2³² subtracted. Both encodings are
+  detected and tested; this machine's own `MaximumDischargeCurrent` holds an
+  example of the first.
+- **The percentage the OS shows you is smoothed and the raw one is not.** Both
+  are reported, labelled, and they will disagree — 25% versus 24.0% above.
+- **`InstantAmperage` is noisy sample to sample**, so a 5-sample rolling median
+  is reported alongside the raw value. A control loop should close on the
+  median; a single spike must not move it.
+
+Package power needs root, so it is **never required**. Without it every power
+field reads `nil`, the tool works normally, and it tells you why rather than
+showing a blank. When available, `powermetrics` runs as a single long-lived
+subprocess streaming `-f plist`, parsed with `PropertyListSerialization` — one
+process per sample would cost hundreds of milliseconds of startup and perturb
+the very thing being measured.
+
+On battery, system draw minus package draw is reported as **other**: the
+display, radios, and storage.
+
+## The power curve
+
+```
+stressd calibrate                          # 0-100% in steps of 10
+stressd calibrate --points 0,25,50,75,100 --dwell 90s
+stressd calibrate --json > curve.json
+stressd calibrate --output-path curve.csv
+```
+
+Run it on battery. On AC the only available figure is SoC package power, which
+misses the display and everything else, so `calibrate` refuses unless you pass
+`--allow-ac`.
+
+**The methodology is the point here, more than the code.**
+
+- **The sweep order is randomised.** A monotonic 0→100% sweep conflates load
+  with accumulated heat: the 90% point would be measured on a machine that has
+  been hot for ten minutes and would read low from throttling, bending the
+  curve in a way that is an artefact of the sweep rather than a property of the
+  chip. The shuffle is seeded, so a sweep is reproducible.
+- **Each point gets a cooldown**, gated on `thermalState` returning to
+  `.nominal` or a fixed floor, whichever is longer, with a cap so a machine that
+  never cools cannot hang the sweep.
+- **A settling window after each change is discarded** before averaging starts.
+  Power does not step instantaneously and neither does core frequency.
+- **Thermal state is recorded per point**, and any point not measured entirely
+  at `.nominal` is flagged as suspect in the output.
+- **A baseline is subtracted from everything**, so the curve measures stressd's
+  load rather than your browser tabs.
+
+The curve is cached at `~/.config/stressd/power-curve.json` so the power
+governor can seed itself from it instead of learning cold.
+
+The interesting derived number is **watts per percentage point of load**. If it
+is flat, power scales linearly with load; where it steps is the efficiency
+knee.
+
 ## Safety
 
 Sustained full load on a Mac is a real thermal event, not a benchmark run.
@@ -301,7 +408,7 @@ In build order:
 
 1. ✅ Package scaffold, `CoreTopology`, `stressd topology`
 2. ✅ `SyntheticSource` with duty-cycled CPU workers, per-core telemetry, `stressd watch`
-3. Battery and power telemetry, `stressd calibrate`
+3. ✅ Battery and power telemetry, `stressd calibrate`
 4. `BOINCSource` and the synthetic top-up mixing logic
 5. Power governor with a wattage target
 6. Metal GPU worker
