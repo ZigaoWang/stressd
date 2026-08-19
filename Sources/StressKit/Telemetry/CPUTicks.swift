@@ -77,7 +77,15 @@ public struct CoreUtilization: Sendable, Equatable, Codable {
   }
 
   /// Everything that is not idle.
+  ///
+  /// Derived from `idle` rather than summed from the other three, so `busy` and
+  /// `idle` can never disagree.
   public var busy: Double { min(max(1 - idle, 0), 1) }
+
+  /// Whether the four buckets partition the interval, as they must.
+  public var sumsToWhole: Bool {
+    abs((user + system + nice + idle) - 1) < 1e-9
+  }
 }
 
 /// Utilization aggregated over one performance level.
@@ -118,6 +126,14 @@ public struct CPUSample: Sendable, Equatable, Codable {
   public let byPerfLevel: [PerfLevelUtilization]
   /// Mean busy fraction across every logical CPU: 1.0 is the whole machine.
   public let systemWide: Double
+  /// Mean idle fraction. Reported alongside `systemWide` so the output can be
+  /// diffed directly against `top -l 2 -n 0`, which quotes idle rather than
+  /// busy. The two must sum to 1.
+  public let systemWideIdle: Double
+  /// Mean user, system and nice fractions across every logical CPU.
+  public let systemWideUser: Double
+  public let systemWideSystem: Double
+  public let systemWideNice: Double
 
   public init(
     timestamp: Date,
@@ -129,7 +145,28 @@ public struct CPUSample: Sendable, Equatable, Codable {
     self.interval = interval
     self.perCore = perCore
     self.byPerfLevel = byPerfLevel
+
+    let count = Double(max(perCore.count, 1))
     self.systemWide =
-      perCore.isEmpty ? 0 : perCore.reduce(0) { $0 + $1.busy } / Double(perCore.count)
+      perCore.isEmpty ? 0 : perCore.reduce(0) { $0 + $1.busy } / count
+    self.systemWideIdle =
+      perCore.isEmpty ? 1 : perCore.reduce(0) { $0 + $1.idle } / count
+    self.systemWideUser = perCore.reduce(0) { $0 + $1.user } / count
+    self.systemWideSystem = perCore.reduce(0) { $0 + $1.system } / count
+    self.systemWideNice = perCore.reduce(0) { $0 + $1.nice } / count
+
+    assert(
+      perCore.allSatisfy { $0.sumsToWhole },
+      "CPU state fractions must sum to 1: a bucket is being dropped or double counted")
+  }
+
+  /// Largest deviation from 1.0 across the per-core fractions.
+  ///
+  /// The four `CPU_STATE_*` buckets partition the interval, so they must sum to
+  /// exactly 1. Anything else means a bucket was dropped, counted twice, or
+  /// divided by the wrong base — the failure modes that would silently invert
+  /// or inflate every utilization figure stressd reports.
+  public var largestFractionError: Double {
+    perCore.map { abs(($0.user + $0.system + $0.nice + $0.idle) - 1) }.max() ?? 0
   }
 }
