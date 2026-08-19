@@ -124,17 +124,27 @@ Single P-core, release build, best of 5 runs of 20 M iterations.
 The rejected form emitted two `mov.16b` per `fmla`; the shipping rotation form
 emits none.
 
-Whole machine, all 12 cores, `stressd run --cpu 100`, single run each:
+Whole machine, all 12 cores, `stressd run --cpu 100`.
 
-| kind | GFLOPS estimate | notes |
-|---|---:|---|
-| `cpuFloat` | 169.6–184.6 | FP64 through NEON |
-| `cpuMatrix` | 332.9 | FP64 through Accelerate |
-| `cpuInteger` | — | reports no FLOPs by design |
-| `cpuMemory` | 0.4 | bandwidth bound, FLOPs are not the unit |
+**These figures move by a factor of three or more with machine state**, so they
+are quoted as ranges with the condition attached. The stable result is the
+*ratio* between kinds measured back to back.
 
-`cpuFloat` varied between 169.6 and 184.6 across runs on a machine with a
-live desktop working set. Treat the spread as the measurement noise floor.
+| kind | quiet machine | busy machine | notes |
+|---|---:|---:|---|
+| `cpuFloat` | 169.6–184.6 | 46.7–49.1 | FP64 through NEON |
+| `cpuMatrix` | 332.9 | 64.1–70.6 | FP64 through Accelerate |
+| `cpuInteger` | — | — | reports no FLOPs by design |
+| `cpuMemory` | 0.4 | — | bandwidth bound; FLOPs are not the unit |
+
+`cpuMatrix` over `cpuFloat`: **2.0x** on the quiet machine, **1.4x** on the
+busy one, measured back to back in the same conditions.
+
+**Inferred** as to why the advantage shrinks and why twelve threads do not
+scale the way one does: the matrix unit is believed to be shared per CPU
+cluster rather than per core, so twelve threads issuing `dgemm` contend for two
+units. This fits the data but is not confirmed; see
+[mechanisms.md §7](mechanisms.md#7-cpumatrix-reaches-an-execution-resource-neon-cannot).
 
 ### Accelerate `dgemm`
 
@@ -146,6 +156,12 @@ Single calling thread, warm, single run:
 | 64 | 297.8–309.3 |
 | 128 | 375.1 |
 | 256 | 393.6 |
+
+Measured again later the same night on a much busier machine, in isolated C
+rather than Swift: 131.0 GFLOPS with the ILP64 CBLAS interface and 91.2 with
+the deprecated legacy one, both at n=64. The ILP64 interface being the faster
+of the two is why stressd selects it. Same caveat as above: absolute numbers
+track machine state closely, the ratio is the durable part.
 
 At n=64, one calling thread consumed **1.78 cores** of CPU time (utilization
 delta 14.9% of 12 cores, measured against a 19.9% baseline) while delivering

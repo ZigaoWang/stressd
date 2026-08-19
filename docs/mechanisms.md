@@ -246,6 +246,13 @@ templates.
 The 1.78-core figure also means Accelerate is doing some work off the calling
 thread, so "single threaded" would be the wrong description.
 
+**Also inferred:** that the matrix unit is shared per CPU cluster rather than
+per core. Twelve `dgemm` threads deliver nowhere near twelve times one thread's
+throughput, and the `cpuMatrix` advantage over `cpuFloat` shrinks from 2.0x on
+a quiet machine to 1.4x on a busy one. Cluster-level sharing fits both
+observations, but so would several other explanations, including simple memory
+bandwidth limits.
+
 ---
 
 ## 8. GPU and CPU contend, asymmetrically
