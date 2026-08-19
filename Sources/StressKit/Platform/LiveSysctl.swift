@@ -82,14 +82,14 @@ public struct LiveSysctl: SysctlReading {
   /// The dotted name of an OID, via the `{0, 1}` (`CTL_SYSCTL_NAME`) meta-OID.
   private static func name(of oid: [Int32]) -> String? {
     var query: [Int32] = [0, 1] + oid
-    var buffer = [CChar](repeating: 0, count: 1024)
+    var buffer = [UInt8](repeating: 0, count: 1024)
     var size = buffer.count
 
     let status = buffer.withUnsafeMutableBytes { raw in
       sysctl(&query, u_int(query.count), raw.baseAddress, &size, nil, 0)
     }
     guard status == 0 else { return nil }
-    return String(cString: buffer)
+    return String(decoding: buffer.prefix(size).prefix { $0 != 0 }, as: UTF8.self)
   }
 
   private static func mapErrno(_ code: Int32, name: String) -> StressKitError {
