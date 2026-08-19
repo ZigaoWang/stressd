@@ -43,6 +43,8 @@ public struct Telemetry: Sendable, Codable {
   /// Zero while the synthetic source is the only one running.
   public let contributedFraction: Double
   public let activeSources: [SourceStatus]
+  /// How measured load divides between contributed and synthetic work.
+  public let loadSplit: LoadSplit?
 
   /// Total system draw while on battery, as a positive number of watts.
   ///
@@ -74,7 +76,8 @@ public struct Telemetry: Sendable, Codable {
     cycleCount: Int? = nil,
     batteryTemperatureCelsius: Double? = nil,
     contributedFraction: Double = 0,
-    activeSources: [SourceStatus] = []
+    activeSources: [SourceStatus] = [],
+    loadSplit: LoadSplit? = nil
   ) {
     self.timestamp = timestamp
     self.interval = interval
@@ -95,6 +98,7 @@ public struct Telemetry: Sendable, Codable {
     self.batteryTemperatureCelsius = batteryTemperatureCelsius
     self.contributedFraction = contributedFraction
     self.activeSources = activeSources
+    self.loadSplit = loadSplit
   }
 }
 
