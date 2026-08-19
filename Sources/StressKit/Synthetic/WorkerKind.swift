@@ -1,4 +1,4 @@
-import Accelerate
+import CStressAtomics
 import Foundation
 
 /// Which compute kernel a synthetic CPU worker runs.
@@ -244,12 +244,9 @@ public struct CPUMatrixKernel: ComputeKernel, @unchecked Sendable {
     guard iterations > 0 else { return }
     let n = Int32(Self.order)
     for _ in 0..<iterations {
-      // beta = 0 so C is overwritten rather than accumulating without bound.
-      cblas_dgemm(
-        CblasRowMajor, CblasNoTrans, CblasNoTrans,
-        n, n, n,
-        1.0, a, n, b, n,
-        0.0, c, n)
+      // beta = 0 inside the shim, so C is overwritten rather than accumulating
+      // without bound over an indefinite run.
+      stressd_dgemm_square(a, b, c, n)
     }
   }
 

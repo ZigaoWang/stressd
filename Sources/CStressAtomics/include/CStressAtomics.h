@@ -14,6 +14,15 @@
 #ifndef CSTRESS_ATOMICS_H
 #define CSTRESS_ATOMICS_H
 
+// Must precede any Accelerate include in this translation unit: these macros
+// select the current ILP64 CBLAS declarations over the deprecated legacy ones.
+// A Swift target cannot set them, because `swiftSettings: .define` sets Swift
+// compilation conditions rather than Clang preprocessor macros, and
+// `unsafeFlags` would make this package unusable as a dependency.
+#define ACCELERATE_NEW_LAPACK 1
+#define ACCELERATE_LAPACK_ILP64 1
+#include <Accelerate/Accelerate.h>
+
 #include <stdatomic.h>
 #include <stdint.h>
 
@@ -46,6 +55,17 @@ static inline void stressd_atomic_store_seq_u64(uint64_t *pointer, uint64_t valu
 /// Sequentially consistent load, paired with `stressd_atomic_store_seq_u64`.
 static inline uint64_t stressd_atomic_load_seq_u64(const uint64_t *pointer) {
   return atomic_load_explicit((const _Atomic(uint64_t) *)pointer, memory_order_seq_cst);
+}
+
+/// Row-major double matrix multiply: C = A x B, for square n-by-n matrices.
+///
+/// Accelerate dispatches this to whatever execution resource the hardware
+/// offers. Measured on an M3 Pro it delivers far more FP64 throughput per
+/// core-second than NEON can, which is the reason the cpuMatrix worker exists.
+static inline void stressd_dgemm_square(
+    const double *a, const double *b, double *c, int n) {
+  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+              n, n, n, 1.0, a, n, b, n, 0.0, c, n);
 }
 
 #endif /* CSTRESS_ATOMICS_H */
