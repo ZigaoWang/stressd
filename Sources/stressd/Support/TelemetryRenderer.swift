@@ -8,7 +8,7 @@ enum TelemetryRenderer {
   /// running — requested duty cycle beside observed utilization.
   static func frame(
     _ telemetry: Telemetry, topology: CoreTopology, width: Int, baseline: Double? = nil,
-    mix: LoadMixer.Sample? = nil
+    mix: LoadMixer.Sample? = nil, governor: GovernorDecision? = nil
   ) -> [String] {
     var lines: [String] = []
     lines.append(header(telemetry, topology: topology))
@@ -16,6 +16,16 @@ enum TelemetryRenderer {
     lines.append(contentsOf: perCore(telemetry, topology: topology, width: width))
     lines.append("")
     lines.append(contentsOf: byLevel(telemetry))
+
+    if let governor, governor.thermalAction != .none {
+      lines.append("")
+      lines.append("  Governor")
+      lines.append("    \(governor.reason)")
+      lines.append(
+        "    thermal ceiling \(percent(governor.thermalCeiling))   "
+          + "requested \(percent(governor.requestedTarget))   "
+          + "effective \(percent(governor.effectiveTarget))")
+    }
 
     if let mix {
       lines.append("")

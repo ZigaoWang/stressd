@@ -25,6 +25,15 @@ struct RunCommand: AsyncParsableCommand {
   @Option(name: .long, help: "Target CPU load as a percentage, 0 to 100.")
   var cpu: Double = 100
 
+  @Option(
+    name: .long,
+    help: """
+      Hold a whole-system power draw in watts instead of a utilization target. \
+      Needs a battery reading, or root for package power. Seeds itself from \
+      ~/.config/stressd/power-curve.json when one exists.
+      """)
+  var targetWatts: Double?
+
   @Option(name: .long, help: "Stop after this long, e.g. 60s, 30m, 2h. Default: no limit.")
   var duration: String?
 
@@ -94,7 +103,9 @@ struct RunCommand: AsyncParsableCommand {
   func run() async throws {
     let topology = try CoreTopologyDetector().detect()
     let placement = try Self.placement(for: level, topology: topology)
-    let budget = ResourceBudget(cpu: cpu / 100, placement: placement)
+    let loadTarget: LoadTarget =
+      targetWatts.map { LoadTarget.powerDraw(watts: $0) } ?? .utilization(cpu / 100)
+    let budget = ResourceBudget(cpu: loadTarget.fixedUtilization ?? 0, placement: placement)
     let deadline = try duration.map { Date().addingTimeInterval(try DurationParser.parse($0)) }
     let startedAt = Date()
 
@@ -154,6 +165,11 @@ struct RunCommand: AsyncParsableCommand {
     await mixer.setBaseline(baseline ?? 0)
     try await mixer.start()
 
+    // Sits above the mixer: it decides the total, the mixer splits it. The
+    // thermal override lives here and is not configurable.
+    let governor = Governor(
+      topology: topology, target: loadTarget, curve: try? PowerCurve.read())
+
     let monitor = TelemetryMonitor(
       topology: topology, interval: interval, power: PowerMonitor())
     await monitor.observe(boinc.map { [source, $0] } ?? [source])
@@ -162,12 +178,18 @@ struct RunCommand: AsyncParsableCommand {
 
     let work = Task {
       for await telemetry in await monitor.stream() {
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastTick)
+        lastTick = now
+
+        // The governor decides the total, including the hard thermal override.
+        // Nothing downstream can undo it.
+        let ruling = await governor.tick(telemetry: telemetry, elapsed: elapsed)
+        await mixer.setTarget(ruling.effectiveTarget)
+
         // The mixing step: measure what is happening, then close the gap with
         // synthetic load. Never respawns; adjust changes duty on live threads.
-        let now = Date()
-        let split = await mixer.tick(
-          observed: telemetry.cpu, elapsed: now.timeIntervalSince(lastTick))
-        lastTick = now
+        let split = await mixer.tick(observed: telemetry.cpu, elapsed: elapsed)
 
         if emitJSON {
           print(try JSONReport.encodeLine(telemetry.merging(split)))
@@ -175,11 +197,13 @@ struct RunCommand: AsyncParsableCommand {
           renderer.render(
             TelemetryRenderer.frame(
               telemetry, topology: topology, width: Terminal.columns, baseline: baseline,
-              mix: split))
+              mix: split, governor: ruling))
         }
-        // Thermal back-off belongs here, between reading the state and the next
-        // adjust(). It arrives with the governor in a later step; today the
-        // state is only reported.
+        if ruling.isStopped {
+          FileHandle.standardError.write(
+            Data("\nthermal state critical: stopping load\n".utf8))
+          break
+        }
         if let deadline, Date() >= deadline { break }
       }
     }

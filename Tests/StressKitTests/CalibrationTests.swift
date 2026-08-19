@@ -214,6 +214,7 @@ struct CalibrationTests {
 
   // MARK: - Helpers
 
+  /// Shared with GovernorTests, which needs a curve to seed the power controller.
   static func curve(watts: [Double], baseline: Double = 0.05) -> PowerCurve {
     let step = watts.count > 1 ? 1.0 / Double(watts.count - 1) : 1
     let points = watts.enumerated().map { index, value in

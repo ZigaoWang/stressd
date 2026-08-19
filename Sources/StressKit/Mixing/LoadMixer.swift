@@ -59,7 +59,7 @@ public actor LoadMixer {
   private let contributed: [any LoadSource]
   private let boinc: BOINCSource?
   private var controller: MixerController
-  private let budget: ResourceBudget
+  private var budget: ResourceBudget
   /// When false, synthetic never tops up and the shortfall is reported.
   private let allowSyntheticTopUp: Bool
 
@@ -85,6 +85,14 @@ public actor LoadMixer {
     self.boinc = boinc
     self.controller = MixerController(configuration: configuration)
     self.allowSyntheticTopUp = allowSyntheticTopUp
+  }
+
+  /// Replaces the total the mixer is aiming for.
+  ///
+  /// The governor owns the target, including the thermal override; the mixer
+  /// only decides how to reach it.
+  public func setTarget(_ fraction: Double) {
+    budget = ResourceBudget(cpu: fraction, gpu: budget.gpu, placement: budget.placement)
   }
 
   /// Records the machine's pre-existing load. Everything after is measured
