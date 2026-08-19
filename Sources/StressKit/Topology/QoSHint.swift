@@ -60,18 +60,54 @@ public enum QoSHint: String, Sendable, Codable, CaseIterable {
     }
   }
 
-  /// Whether this class's timer wake-ups are coalesced too aggressively for a
-  /// millisecond-scale duty cycle.
+  /// Whether this class's timer wake-ups are coalesced far beyond a
+  /// millisecond-scale duty cycle period.
   ///
   /// Measured on an M3 Pro, median overshoot on a requested 2.5 ms sleep:
-  /// `.userInteractive` 638 us, `.utility` 7654 us, `.background` 77635 us. The
-  /// first is absorbed by the duty cycler's work-debt accounting; the other two
-  /// are not, and need an explicit low latency tier. See `ThreadTimerPolicy`.
+  /// `.userInteractive` 638 us, `.utility` 7654 us, `.background` 77635 us.
   public var coalescesTimersAggressively: Bool {
     switch self {
     case .userInteractive, .userInitiated, .default: return false
     case .utility, .background: return true
     }
+  }
+
+  /// The duty cycle period that holds a target on this QoS class *without*
+  /// disturbing where the scheduler puts the work.
+  ///
+  /// ## Why the two levels differ
+  ///
+  /// macOS coalesces `.background` timer wake-ups by up to 77 ms, which a 5 ms
+  /// period cannot survive: measured, it produced 3% duty against a 50%
+  /// request. The obvious fix is `THREAD_LATENCY_QOS_POLICY`, and it does fix
+  /// the timing — but every latency tier precise enough to matter also lifts
+  /// the thread off the efficiency cores, which defeats the reason the worker
+  /// asked for `.background` in the first place.
+  ///
+  /// Lengthening the period fixes it with no such cost. The work-debt model
+  /// absorbs an overshoot that is small relative to the period, so the question
+  /// is only how long the period has to be. Measured on an M3 Pro with six
+  /// `.background` threads and no latency tier, P-core bleed at idle is ~13%:
+  ///
+  /// | period | duty at 25% | duty at 50% | P-cores at 50% |
+  /// |--------|------------:|------------:|---------------:|
+  /// | 5 ms   |        4.5% |       12.3% |          13.4% |
+  /// | 20 ms  |       11.0% |       24.6% |          13.4% |
+  /// | 50 ms  |       19.5% |       39.8% |          19.8% |
+  /// | 100 ms |       25.0% |       49.8% |          11.3% |
+  /// | 200 ms |       24.8% |       50.1% |          14.9% |
+  ///
+  /// For comparison, 5 ms with latency tier 0 hits the duty target exactly but
+  /// pushes P-core usage to 59% — the work is no longer on the efficiency
+  /// cores at all.
+  ///
+  /// 100 ms is the knee: the target is met and placement is untouched. Coarse
+  /// granularity is the right trade for background work, and nothing in the
+  /// duty cycler depends on the period being short.
+  ///
+  /// Reproduce with `swift Tools/measure-timer-coalescing.swift`.
+  public var recommendedPeriodNanoseconds: UInt64 {
+    coalescesTimersAggressively ? 100_000_000 : DutyCycleScheduler.defaultPeriodNanoseconds
   }
 
   /// The hint that best biases work onto performance level `index` of

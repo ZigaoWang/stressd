@@ -37,13 +37,16 @@ public actor SyntheticSource: LoadSource {
   public nonisolated let isContributing = false
 
   private let topology: CoreTopology
-  private let periodNanoseconds: UInt64
+  private let periodNanoseconds: UInt64?
   private let clock: any MonotonicClock
   private nonisolated let box = PoolBox()
 
+  /// - Parameter periodNanoseconds: Overrides the per-level duty cycle period.
+  ///   Leave `nil` to let each performance level use the period its QoS class
+  ///   needs.
   public init(
     topology: CoreTopology,
-    periodNanoseconds: UInt64 = DutyCycleScheduler.defaultPeriodNanoseconds,
+    periodNanoseconds: UInt64? = nil,
     clock: any MonotonicClock = MachMonotonicClock()
   ) {
     self.topology = topology
@@ -124,7 +127,9 @@ public actor SyntheticSource: LoadSource {
         "targetedCPUs": snapshot.placement.targetedLogicalCPUs.map(String.init)
           .joined(separator: ","),
         "abandonedCycles": String(snapshot.abandonedCycles),
-        "placementRelaxedForTiming": snapshot.placementRelaxedForTiming ? "true" : "false",
+        "periodsMs": snapshot.placement.periodNanosecondsByLevel.keys.sorted()
+          .map { "L\($0):\((snapshot.placement.periodNanosecondsByLevel[$0] ?? 0) / 1_000_000)" }
+          .joined(separator: " "),
         "gflops": String(format: "%.1f", Self.gigaflops(snapshot: snapshot)),
       ])
   }

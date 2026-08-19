@@ -18,6 +18,10 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
     /// *expected* to land, not where it did: QoS is a hint.
     public let targetedLogicalCPUs: [Int]
     public let threadCount: Int
+    /// Duty cycle period per performance level, in nanoseconds. Levels whose
+    /// QoS class coalesces timers get a longer one; see
+    /// `QoSHint.recommendedPeriodNanoseconds`.
+    public let periodNanosecondsByLevel: [Int: UInt64]
   }
 
   /// A read of the whole pool.
@@ -26,10 +30,6 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
     public let placement: Placement
     public let workers: [WorkerSample]
     public let isRunning: Bool
-    /// True when workers had to request low latency timers to hold the duty
-    /// cycle, which on macOS also lifts them off the efficiency cores. The
-    /// placement hint is not being honoured while this is set.
-    public let placementRelaxedForTiming: Bool
 
     /// Duty cycle achieved across all workers, measured inside the loops.
     public var achievedDutyCycle: Double? {
@@ -52,12 +52,13 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
   }
 
   private let clock: any MonotonicClock
-  private let periodNanoseconds: UInt64
+  private let periodOverride: UInt64?
   private let dutyCycle = AtomicDouble(0)
   private let isRunningFlag = AtomicFlag(false)
   private let gate: WorkerGate
   private let workers: [SyntheticWorker]
   private var threads: [Thread] = []
+  private let periodsByLevel: [Int: UInt64]
   private let lifecycleLock = NSLock()
 
   public let placement: Placement
@@ -65,16 +66,20 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
   /// - Parameters:
   ///   - topology: Used to size the pool and pick a QoS hint per level.
   ///   - levelIndex: Performance level to target, or `nil` for every core.
-  ///   - periodNanoseconds: Duty cycle period.
+  ///   - periodNanoseconds: Overrides the per-level period. Leave `nil` to use
+  ///     the period each level's QoS class needs, which is what holds the duty
+  ///     cycle without disturbing core placement.
   ///   - clock: Injected so scheduling can be exercised without real threads.
   public init(
     topology: CoreTopology,
     levelIndex: Int?,
-    periodNanoseconds: UInt64 = DutyCycleScheduler.defaultPeriodNanoseconds,
+    periodNanoseconds: UInt64? = nil,
     clock: any MonotonicClock = MachMonotonicClock()
   ) {
     self.clock = clock
-    self.periodNanoseconds = max(periodNanoseconds, DutyCycleScheduler.minimumPeriodNanoseconds)
+    self.periodOverride = periodNanoseconds.map {
+      max($0, DutyCycleScheduler.minimumPeriodNanoseconds)
+    }
     self.gate = WorkerGate(dutyCycle: dutyCycle, isRunning: isRunningFlag)
 
     let levels: [PerformanceLevel]
@@ -86,8 +91,15 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
 
     var built: [SyntheticWorker] = []
     var targeted: [Int] = []
+    var periods: [Int: UInt64] = [:]
     for level in levels {
       targeted.append(contentsOf: level.logicalCPUIDs)
+      // Each level gets the period its QoS class needs. A .background level
+      // whose timers coalesce by tens of milliseconds cannot hold a target on a
+      // 5 ms period, and sharpening its timers instead would move the work off
+      // the efficiency cores.
+      let period = self.periodOverride ?? level.qosHint.recommendedPeriodNanoseconds
+      periods[level.index] = period
       // One thread per logical core on the level, regardless of the duty cycle.
       for _ in 0..<level.logicalCoreCount {
         built.append(
@@ -95,7 +107,7 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
             logicalIndex: built.count,
             performanceLevelIndex: level.index,
             qosHint: level.qosHint,
-            periodNanoseconds: self.periodNanoseconds,
+            periodNanoseconds: period,
             clock: clock,
             dutyCycle: dutyCycle,
             isRunning: isRunningFlag,
@@ -103,13 +115,15 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
       }
     }
     self.workers = built
+    self.periodsByLevel = periods
 
     self.placement = Placement(
       requestedLevelIndex: levels.count == 1 ? levels[0].index : nil,
       requestedLevelName: levels.count == 1 ? levels[0].name : "all",
       qosHint: levels.count == 1 ? levels[0].qosHint : .userInteractive,
       targetedLogicalCPUs: targeted.sorted(),
-      threadCount: self.workers.count)
+      threadCount: self.workers.count,
+      periodNanosecondsByLevel: periods)
   }
 
   public var isRunning: Bool { isRunningFlag.value }
@@ -179,8 +193,7 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
       requestedDutyCycle: dutyCycle.load(),
       placement: placement,
       workers: workers.map { $0.statistics.snapshot() },
-      isRunning: isRunningFlag.value,
-      placementRelaxedForTiming: workers.contains { $0.hasLowLatencyTimers.value })
+      isRunning: isRunningFlag.value)
   }
 
   private static func clamp(_ value: Double) -> Double {

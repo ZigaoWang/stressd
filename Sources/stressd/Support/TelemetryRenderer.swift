@@ -107,11 +107,8 @@ enum TelemetryRenderer {
           .map { "\($0.name) \(percent($0.busy))" }
           .joined(separator: ", ")
         lines.append("      requested \(placement) via .\(hint)   ->   observed \(observed)")
-        if source.detail["placementRelaxedForTiming"] == "true" {
-          lines.append(
-            "      placement relaxed: low latency timers are needed below 100% duty,")
-          lines.append(
-            "      and they lift threads off the efficiency cores. See README.")
+        if let periods = source.detail["periodsMs"], !periods.isEmpty {
+          lines.append("      duty cycle period per level: \(periods) ms")
         }
       }
       if let abandoned = source.detail["abandonedCycles"], abandoned != "0" {

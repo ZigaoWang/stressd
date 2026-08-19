@@ -29,10 +29,6 @@ final class SyntheticWorker: @unchecked Sendable {
   let performanceLevelIndex: Int
   let qosHint: QoSHint
   let statistics = WorkerStatistics()
-  /// Whether the kernel granted the low-latency timer tier. Reported rather
-  /// than assumed: without it the duty cycle is coarse and the user should
-  /// know why.
-  let hasLowLatencyTimers = AtomicFlag(false)
 
   private let clock: any MonotonicClock
   private let dutyCycle: AtomicDouble
@@ -65,6 +61,11 @@ final class SyntheticWorker: @unchecked Sendable {
     // Set on the thread itself rather than only on the Thread object: this is
     // the call the kernel actually reads for scheduling. It remains a hint, not
     // affinity, which is why the pool reports observed placement alongside it.
+    //
+    // Deliberately no THREAD_LATENCY_QOS_POLICY here. It would sharpen the
+    // timer wake-ups but also lift the thread off the efficiency cores; the
+    // longer period this worker was given for its QoS class solves the timing
+    // without touching placement. See QoSHint.recommendedPeriodNanoseconds.
     pthread_set_qos_class_self_np(qosHint.qosClass, 0)
 
     var kernel = CPUFloatKernel(seed: UInt64(logicalIndex &+ 1))
@@ -87,8 +88,6 @@ final class SyntheticWorker: @unchecked Sendable {
         target = dutyCycle.load()
         if target <= 0 { continue }
       }
-
-      applyTimerPolicy(forDutyCycle: target)
 
       let cycle = scheduler.nextCycle(now: cycleStart, dutyCycle: target)
       let busy = compute(until: cycle.workDeadline, kernel: &kernel, estimator: &estimator)
@@ -145,20 +144,6 @@ final class SyntheticWorker: @unchecked Sendable {
 
     statistics.iterations.add(completedIterations)
     return now &- start
-  }
-
-  /// Requests low latency timers only while this worker actually sleeps, and
-  /// only for QoS classes that would otherwise coalesce past the cycle period.
-  ///
-  /// The tier costs core placement: it lifts a `.background` thread off the
-  /// efficiency cores. At a 100% duty cycle there is no sleep to get wrong, so
-  /// the default tier is restored and the placement hint is honoured exactly.
-  /// `thread_policy_set` is a syscall, so this only fires on a transition.
-  private func applyTimerPolicy(forDutyCycle target: Double) {
-    guard qosHint.coalescesTimersAggressively else { return }
-    let wanted = target < 1.0
-    guard wanted != hasLowLatencyTimers.value else { return }
-    hasLowLatencyTimers.value = ThreadTimerPolicy.setLowLatencyTimers(wanted) && wanted
   }
 
   private func publish(checksum: Double, abandoned: UInt64) {

@@ -36,8 +36,15 @@ struct RunCommand: AsyncParsableCommand {
   @Flag(name: .long, help: "Do not use contributed work. Currently implied.")
   var syntheticOnly = false
 
-  @Option(name: .long, help: "Duty cycle period in milliseconds.")
-  var periodMilliseconds: Double = 5
+  @Option(
+    name: .long,
+    help: """
+      Override the duty cycle period, in milliseconds, for every performance \
+      level. By default each level uses the period its QoS class needs: 5 ms \
+      for performance cores, 100 ms for efficiency cores, whose timer wake-ups \
+      macOS coalesces far too coarsely for a short period.
+      """)
+  var periodMilliseconds: Double?
 
   @Option(name: .long, help: "Seconds between telemetry samples.")
   var interval: Double = TelemetryMonitor.defaultInterval
@@ -46,8 +53,10 @@ struct RunCommand: AsyncParsableCommand {
     guard cpu >= 0, cpu <= 100 else {
       throw ValidationError("--cpu must be between 0 and 100")
     }
-    guard periodMilliseconds >= 0.5, periodMilliseconds <= 100 else {
-      throw ValidationError("--period-milliseconds must be between 0.5 and 100")
+    if let periodMilliseconds {
+      guard periodMilliseconds >= 0.5, periodMilliseconds <= 1000 else {
+        throw ValidationError("--period-milliseconds must be between 0.5 and 1000")
+      }
     }
   }
 
@@ -67,7 +76,7 @@ struct RunCommand: AsyncParsableCommand {
 
     let source = SyntheticSource(
       topology: topology,
-      periodNanoseconds: UInt64(periodMilliseconds * 1_000_000))
+      periodNanoseconds: periodMilliseconds.map { UInt64($0 * 1_000_000) })
     // Synchronous so the atexit backstop can use it. Threads must not outlive
     // the process under any exit path.
     CleanupRegistry.shared.register("stop synthetic workers") { source.emergencyStop() }
