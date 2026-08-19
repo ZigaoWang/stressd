@@ -10,6 +10,9 @@ public struct LoadSplit: Sendable, Codable, Equatable {
   public let totalUtilization: Double
   /// Contributed share of the measured total, `0...1`.
   public let contributedFraction: Double
+  /// Load above baseline that belongs to neither: the machine's own work
+  /// drifting away from the baseline captured before the run.
+  public let unattributedUtilization: Double
   /// How synthetic's share was determined.
   public let attribution: Attribution
 
@@ -18,6 +21,9 @@ public struct LoadSplit: Sendable, Codable, Equatable {
     case workerMeasured
     /// Nothing was running, so there was nothing to attribute.
     case idle
+    /// No contributed source exists, so the residual is baseline drift rather
+    /// than contributed work.
+    case noContributedSource
   }
 
   public init(
@@ -29,6 +35,8 @@ public struct LoadSplit: Sendable, Codable, Equatable {
     self.contributedUtilization = max(0, contributedUtilization)
     self.syntheticUtilization = max(0, syntheticUtilization)
     self.totalUtilization = max(0, totalUtilization)
+    self.unattributedUtilization = max(
+      0, self.totalUtilization - self.contributedUtilization - self.syntheticUtilization)
     self.contributedFraction =
       totalUtilization > 0.001 ? min(max(contributedUtilization / totalUtilization, 0), 1) : 0
     self.attribution = attribution
@@ -111,7 +119,11 @@ public actor LoadMixer {
     }
     // Parked, not duty cycling at zero. The gate blocks the threads on a
     // condition variable until there is something to do.
-    try await synthetic.start(budget: ResourceBudget(cpu: 0, placement: budget.placement))
+    //
+    // The GPU target is carried through unchanged: the mixer closes a loop on
+    // CPU utilization, and GPU load is a separate axis it does not control.
+    try await synthetic.start(
+      budget: ResourceBudget(cpu: 0, gpu: budget.gpu, placement: budget.placement))
   }
 
   /// One step of the loop.
@@ -128,7 +140,8 @@ public actor LoadMixer {
     if allowSyntheticTopUp {
       // adjust, never start: this changes the duty cycle on the live threads.
       try? await synthetic.adjust(
-        to: ResourceBudget(cpu: decision.syntheticDuty, placement: budget.placement))
+        to: ResourceBudget(
+          cpu: decision.syntheticDuty, gpu: budget.gpu, placement: budget.placement))
     } else {
       // --contributed-only: the shortfall is reported rather than filled.
       controller.reset(to: 0)
@@ -178,13 +191,19 @@ public actor LoadMixer {
   /// This is deliberately not derived from what was *requested*, because the
   /// entire point of the mixer is that requested and actual differ.
   private func measureSplit(observedDelta: Double) async -> LoadSplit {
+    // With no contributed source there is nothing for the residual to belong
+    // to. Calling it contributed would report a machine that has drifted from
+    // its baseline as having done real work, which is exactly backwards.
+    let hasContributed = !contributed.isEmpty
+
     guard let snapshot = synthetic.poolSnapshot(), snapshot.isRunning else {
       previousWorkers = []
       return LoadSplit(
-        contributedUtilization: observedDelta,
+        contributedUtilization: hasContributed ? observedDelta : 0,
         syntheticUtilization: 0,
         totalUtilization: observedDelta,
-        attribution: observedDelta > 0.001 ? .workerMeasured : .idle)
+        attribution: hasContributed
+          ? (observedDelta > 0.001 ? .workerMeasured : .idle) : .noContributedSource)
     }
 
     // Windowed, not lifetime. The pool's cumulative duty cycle averages over
@@ -206,10 +225,11 @@ public actor LoadMixer {
       Double(snapshot.placement.threadCount) / Double(max(topology.logicalCoreCount, 1))
     let syntheticUtilization = min(1, max(0, achieved * threadShare))
     return LoadSplit(
-      contributedUtilization: max(0, observedDelta - syntheticUtilization),
+      contributedUtilization: hasContributed
+        ? max(0, observedDelta - syntheticUtilization) : 0,
       syntheticUtilization: syntheticUtilization,
       totalUtilization: observedDelta,
-      attribution: .workerMeasured)
+      attribution: hasContributed ? .workerMeasured : .noContributedSource)
   }
 
   /// Duty cycle achieved since the previous read.

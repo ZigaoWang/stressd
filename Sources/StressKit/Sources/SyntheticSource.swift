@@ -14,6 +14,27 @@ public actor SyntheticSource: LoadSource {
   /// path, neither of which can await an actor. The pool's own `stop()` is
   /// synchronous and idempotent, so a plain lock around the reference is enough
   /// and avoids leaving threads running after the process is on its way out.
+  /// Holds the GPU worker outside actor isolation, for the same reason the CPU
+  /// pool is held that way: emergency teardown cannot await.
+  private final class GPUBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var worker: MetalGPUWorker?
+
+    var current: MetalGPUWorker? {
+      lock.lock()
+      defer { lock.unlock() }
+      return worker
+    }
+
+    func replace(with newWorker: MetalGPUWorker?) {
+      lock.lock()
+      let previous = worker
+      worker = newWorker
+      lock.unlock()
+      previous?.stop()
+    }
+  }
+
   private final class PoolBox: @unchecked Sendable {
     private let lock = NSLock()
     private var pool: SyntheticWorkerPool?
@@ -37,6 +58,8 @@ public actor SyntheticSource: LoadSource {
   public nonisolated let isContributing = false
 
   private let topology: CoreTopology
+  private let gpuProfile: GPUProfile
+  private nonisolated let gpuBox = GPUBox()
   private let periodNanoseconds: UInt64?
   private let periodPolicy = PeriodPolicy()
   private let clock: any MonotonicClock
@@ -48,9 +71,11 @@ public actor SyntheticSource: LoadSource {
   public init(
     topology: CoreTopology,
     periodNanoseconds: UInt64? = nil,
+    gpuProfile: GPUProfile = .mixed,
     clock: any MonotonicClock = MachMonotonicClock()
   ) {
     self.topology = topology
+    self.gpuProfile = gpuProfile
     self.periodNanoseconds = periodNanoseconds
     self.clock = clock
   }
@@ -63,6 +88,8 @@ public actor SyntheticSource: LoadSource {
     let existing = box.current
     if let existing, existing.placement.requestedLevelIndex == budget.placement.levelIndex {
       existing.start(dutyCycle: budget.cpu)
+      // GPU load is independent of the CPU pool and must still be started.
+      startGPUIfRequested(budget)
       return
     }
 
@@ -77,6 +104,20 @@ public actor SyntheticSource: LoadSource {
       clock: clock)
     box.replace(with: pool)
     pool.start(dutyCycle: budget.cpu)
+    startGPUIfRequested(budget)
+  }
+
+  /// Starts or updates the Metal worker. GPU load is always optional: a machine
+  /// with no usable Metal device runs CPU load and reports the GPU as absent.
+  private func startGPUIfRequested(_ budget: ResourceBudget) {
+    guard let gpu = budget.gpu, gpu > 0 else {
+      gpuBox.current?.setDutyCycle(0)
+      return
+    }
+    if gpuBox.current == nil {
+      gpuBox.replace(with: MetalGPUWorker(profile: gpuProfile, clock: clock))
+    }
+    gpuBox.current?.start(dutyCycle: gpu)
   }
 
   /// Changes the duty cycle on live threads.
@@ -93,16 +134,48 @@ public actor SyntheticSource: LoadSource {
       return
     }
     pool.setDutyCycle(budget.cpu)
+    if let gpu = budget.gpu {
+      gpuBox.current?.setDutyCycle(gpu)
+    }
   }
 
   public func stop() async {
     box.replace(with: nil)
+    gpuBox.replace(with: nil)
   }
 
   /// Synchronous teardown for exit paths that cannot await, such as the
   /// `atexit` backstop. Idempotent.
   public nonisolated func emergencyStop() {
     box.replace(with: nil)
+    gpuBox.replace(with: nil)
+  }
+
+  /// GPU fields for `SourceStatus`, empty when no GPU load is running.
+  private nonisolated func gpuDetail() -> [String: String] {
+    guard let gpu = gpuBox.current?.snapshot() else { return [:] }
+    var detail: [String: String] = [
+      "gpuDevice": gpu.deviceName,
+      "gpuProfile": gpu.profile.rawValue,
+      "gpuRequested": String(format: "%.1f%%", gpu.requestedDutyCycle * 100),
+      "gpuDispatches": String(gpu.dispatches),
+    ]
+    if let achieved = gpu.achievedDutyCycle {
+      detail["gpuAchieved"] = String(format: "%.1f%%", achieved * 100)
+    }
+    if let geometry = gpu.geometry {
+      detail["gpuGeometry"] =
+        "\(geometry.threadsPerThreadgroup)x\(geometry.threadgroupCount)"
+    }
+    if let gigaflops = gpu.estimatedGigaflops {
+      detail["gpuGflops"] = String(format: "%.1f", gigaflops)
+    }
+    return detail
+  }
+
+  /// A read of the GPU worker's counters, or `nil` when no GPU load is running.
+  public nonisolated func gpuSnapshot() -> GPUWorkerSample? {
+    gpuBox.current?.snapshot()
   }
 
   public func status() async throws -> SourceStatus {
@@ -137,7 +210,7 @@ public actor SyntheticSource: LoadSource {
           .map { "L\($0):\((snapshot.periodNanosecondsByLevel[$0] ?? 0) / 1_000_000)" }
           .joined(separator: " "),
         "gflops": String(format: "%.1f", Self.gigaflops(snapshot: snapshot)),
-      ])
+      ].merging(gpuDetail()) { current, _ in current })
   }
 
   /// Re-measures the timer coalescing window and updates live worker periods.

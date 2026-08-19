@@ -54,6 +54,11 @@ enum TelemetryRenderer {
     lines.append(
       "    synthetic    \(bar(mix.split.syntheticUtilization, width: barWidth)) "
         + "\(percent(mix.split.syntheticUtilization))   computes nothing")
+    if mix.split.unattributedUtilization > 0.02 {
+      lines.append(
+        "    unattributed \(bar(mix.split.unattributedUtilization, width: barWidth)) "
+          + "\(percent(mix.split.unattributedUtilization))   baseline drift")
+    }
     lines.append(
       "    total        \(bar(mix.split.totalUtilization, width: barWidth)) "
         + "\(percent(mix.split.totalUtilization))   over baseline")
@@ -229,8 +234,28 @@ enum TelemetryRenderer {
       if let abandoned = source.detail["abandonedCycles"], abandoned != "0" {
         lines.append("      \(abandoned) cycles abandoned (machine oversubscribed)")
       }
-      if let gflops = source.detail["gflops"] {
-        lines.append("      \(gflops) GFLOPS FP64 (estimate)")
+      if let gflops = source.detail["gflops"], gflops != "0.0" {
+        lines.append("      \(gflops) GFLOPS FP64 (estimate, not a benchmark score)")
+      }
+      if let device = source.detail["gpuDevice"] {
+        var parts = ["      GPU \(device)"]
+        if let profile = source.detail["gpuProfile"] { parts.append("profile \(profile)") }
+        if let requested = source.detail["gpuRequested"] {
+          parts.append("requested \(requested)")
+        }
+        if let achieved = source.detail["gpuAchieved"] { parts.append("busy \(achieved)") }
+        lines.append(parts.joined(separator: "   "))
+        var second: [String] = []
+        if let geometry = source.detail["gpuGeometry"] {
+          second.append("threads/group x groups \(geometry)")
+        }
+        if let dispatches = source.detail["gpuDispatches"] {
+          second.append("\(dispatches) dispatches")
+        }
+        if let gigaflops = source.detail["gpuGflops"] {
+          second.append("\(gigaflops) GFLOPS FP32 (estimate)")
+        }
+        if !second.isEmpty { lines.append("        " + second.joined(separator: "   ")) }
       }
     }
     return lines

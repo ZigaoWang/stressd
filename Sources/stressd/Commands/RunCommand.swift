@@ -25,6 +25,12 @@ struct RunCommand: AsyncParsableCommand {
   @Option(name: .long, help: "Target CPU load as a percentage, 0 to 100.")
   var cpu: Double = 100
 
+  @Option(name: .long, help: "Target GPU load as a percentage, 0 to 100. Off by default.")
+  var gpu: Double?
+
+  @Option(name: .long, help: "GPU workload shape: alu, bandwidth, or mixed.")
+  var gpuProfile: String = "mixed"
+
   @Option(
     name: .long,
     help: """
@@ -87,6 +93,16 @@ struct RunCommand: AsyncParsableCommand {
     guard !(syntheticOnly && contributedOnly) else {
       throw ValidationError("--synthetic-only and --contributed-only are mutually exclusive")
     }
+    if let gpu {
+      guard gpu >= 0, gpu <= 100 else {
+        throw ValidationError("--gpu must be between 0 and 100")
+      }
+    }
+    guard GPUProfile(rawValue: gpuProfile) != nil else {
+      throw ValidationError(
+        "--gpu-profile must be one of: "
+          + GPUProfile.allCases.map(\.rawValue).joined(separator: ", "))
+    }
     guard slewRate > 0, slewRate <= 100 else {
       throw ValidationError("--slew-rate must be between 0 and 100 points per second")
     }
@@ -105,7 +121,8 @@ struct RunCommand: AsyncParsableCommand {
     let placement = try Self.placement(for: level, topology: topology)
     let loadTarget: LoadTarget =
       targetWatts.map { LoadTarget.powerDraw(watts: $0) } ?? .utilization(cpu / 100)
-    let budget = ResourceBudget(cpu: loadTarget.fixedUtilization ?? 0, placement: placement)
+    let budget = ResourceBudget(
+      cpu: loadTarget.fixedUtilization ?? 0, gpu: gpu.map { $0 / 100 }, placement: placement)
     let deadline = try duration.map { Date().addingTimeInterval(try DurationParser.parse($0)) }
     let startedAt = Date()
 
@@ -118,7 +135,8 @@ struct RunCommand: AsyncParsableCommand {
 
     let source = SyntheticSource(
       topology: topology,
-      periodNanoseconds: periodMilliseconds.map { UInt64($0 * 1_000_000) })
+      periodNanoseconds: periodMilliseconds.map { UInt64($0 * 1_000_000) },
+      gpuProfile: GPUProfile(rawValue: gpuProfile) ?? .mixed)
     // Synchronous so the atexit backstop can use it. Threads must not outlive
     // the process under any exit path.
     CleanupRegistry.shared.register("stop synthetic workers") { source.emergencyStop() }
