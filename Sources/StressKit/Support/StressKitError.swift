@@ -17,6 +17,12 @@ public enum StressKitError: Error, Equatable, Sendable {
   case ioRegistryNoCPUClusters
   /// stressd was asked to run on hardware it does not support.
   case unsupportedHardware(String)
+  /// `host_processor_info` returned an error.
+  case processorInfoFailed(kernReturn: Int32)
+  /// `host_processor_info` returned fewer values than it reported CPUs.
+  case processorInfoTruncated(expected: Int, received: Int)
+  /// A sleep assertion could not be taken.
+  case powerAssertionFailed(kernReturn: Int32)
 }
 
 extension StressKitError: CustomStringConvertible {
@@ -34,6 +40,12 @@ extension StressKitError: CustomStringConvertible {
       return "IORegistry contained no CPU nodes with cluster-type properties"
     case .unsupportedHardware(let detail):
       return "unsupported hardware: \(detail)"
+    case .processorInfoFailed(let code):
+      return "host_processor_info failed with kern_return_t \(code)"
+    case .processorInfoTruncated(let expected, let received):
+      return "host_processor_info returned \(received) values, expected \(expected)"
+    case .powerAssertionFailed(let code):
+      return "IOPMAssertionCreateWithName failed with IOReturn \(code)"
     }
   }
 }

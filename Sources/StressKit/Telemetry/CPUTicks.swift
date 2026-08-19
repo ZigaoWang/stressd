@@ -1,0 +1,135 @@
+import Foundation
+
+/// Raw scheduler tick counters for one logical CPU.
+///
+/// These are free-running `natural_t` counts since boot. On their own they mean
+/// nothing: utilization is the ratio of deltas between two reads.
+public struct CPUTicks: Sendable, Equatable, Codable {
+  public let user: UInt32
+  public let system: UInt32
+  public let idle: UInt32
+  public let nice: UInt32
+
+  public init(user: UInt32, system: UInt32, idle: UInt32, nice: UInt32) {
+    self.user = user
+    self.system = system
+    self.idle = idle
+    self.nice = nice
+  }
+
+  /// Ticks elapsed since an earlier read.
+  ///
+  /// Subtraction wraps deliberately. The counters are 32 bit and increment at
+  /// the scheduler tick rate, so each one rolls over roughly every 497 days of
+  /// accumulated time in that state. Wrapping subtraction gives the correct
+  /// delta across a single rollover; signed subtraction would produce a
+  /// nonsensical negative interval and a utilization figure to match.
+  public func delta(since previous: CPUTicks) -> Delta {
+    Delta(
+      user: user &- previous.user,
+      system: system &- previous.system,
+      idle: idle &- previous.idle,
+      nice: nice &- previous.nice)
+  }
+
+  /// A difference between two reads.
+  public struct Delta: Sendable, Equatable {
+    public let user: UInt32
+    public let system: UInt32
+    public let idle: UInt32
+    public let nice: UInt32
+
+    public var total: UInt64 {
+      UInt64(user) + UInt64(system) + UInt64(idle) + UInt64(nice)
+    }
+
+    /// Fractions of the interval, or `nil` when no ticks elapsed at all, which
+    /// happens when two samples land inside the same scheduler tick.
+    public func utilization(cpu: Int) -> CoreUtilization? {
+      let total = total
+      guard total > 0 else { return nil }
+      let divisor = Double(total)
+      return CoreUtilization(
+        cpu: cpu,
+        user: Double(user) / divisor,
+        system: Double(system) / divisor,
+        nice: Double(nice) / divisor,
+        idle: Double(idle) / divisor)
+    }
+  }
+}
+
+/// Utilization of one logical CPU over an interval, as fractions summing to 1.
+public struct CoreUtilization: Sendable, Equatable, Codable {
+  /// Logical CPU number, matching `CoreTopology`'s `logicalCPUIDs`.
+  public let cpu: Int
+  public let user: Double
+  public let system: Double
+  public let nice: Double
+  public let idle: Double
+
+  public init(cpu: Int, user: Double, system: Double, nice: Double, idle: Double) {
+    self.cpu = cpu
+    self.user = user
+    self.system = system
+    self.nice = nice
+    self.idle = idle
+  }
+
+  /// Everything that is not idle.
+  public var busy: Double { min(max(1 - idle, 0), 1) }
+}
+
+/// Utilization aggregated over one performance level.
+public struct PerfLevelUtilization: Sendable, Equatable, Codable {
+  public let levelIndex: Int
+  public let name: String
+  public let coreCount: Int
+  public let user: Double
+  public let system: Double
+  public let nice: Double
+  public let idle: Double
+
+  public var busy: Double { min(max(1 - idle, 0), 1) }
+
+  /// Mean over the cores on a level. Every core is one thread's worth of
+  /// capacity, so an unweighted mean is the right aggregate.
+  public init?(levelIndex: Int, name: String, cores: [CoreUtilization]) {
+    guard !cores.isEmpty else { return nil }
+    let count = Double(cores.count)
+    self.levelIndex = levelIndex
+    self.name = name
+    self.coreCount = cores.count
+    self.user = cores.reduce(0) { $0 + $1.user } / count
+    self.system = cores.reduce(0) { $0 + $1.system } / count
+    self.nice = cores.reduce(0) { $0 + $1.nice } / count
+    self.idle = cores.reduce(0) { $0 + $1.idle } / count
+  }
+}
+
+/// One interval of CPU utilization.
+public struct CPUSample: Sendable, Equatable, Codable {
+  public let timestamp: Date
+  public let interval: TimeInterval
+  /// One entry per logical CPU, ordered by logical CPU number.
+  public let perCore: [CoreUtilization]
+  /// Aggregated using the topology's CPU index map, so these carry the
+  /// Performance / Efficiency labels rather than raw indices.
+  public let byPerfLevel: [PerfLevelUtilization]
+  /// Mean busy fraction across every logical CPU: 1.0 is the whole machine.
+  public let systemWide: Double
+
+  public init(
+    timestamp: Date,
+    interval: TimeInterval,
+    perCore: [CoreUtilization],
+    byPerfLevel: [PerfLevelUtilization]
+  ) {
+    self.timestamp = timestamp
+    self.interval = interval
+    self.perCore = perCore
+    self.byPerfLevel = byPerfLevel
+    self.systemWide =
+      perCore.isEmpty ? 0 : perCore.reduce(0) { $0 + $1.busy } / Double(perCore.count)
+  }
+}
