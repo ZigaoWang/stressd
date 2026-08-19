@@ -23,9 +23,9 @@ Under construction, built in stages. What exists today:
 | | |
 |---|---|
 | `stressd topology` | ✅ shipped |
-| `stressd watch` | in progress |
+| `stressd watch` | ✅ shipped |
+| `stressd run` | ✅ shipped, synthetic load only |
 | `stressd calibrate` | planned |
-| `stressd run` | planned |
 | `stressd sources` | planned |
 
 The sections below describe the parts that are built. The [roadmap](#roadmap)
@@ -163,6 +163,121 @@ reports the **observed** per-core utilization next to the **requested**
 placement, so the gap between what was asked for and what happened is visible
 rather than assumed away.
 
+## Load
+
+```
+stressd run --cpu 50                    # every core at 50% duty
+stressd run --cpu 100 --duration 30m
+stressd run --cpu 75 --level efficiency
+stressd watch                           # live telemetry, applies no load
+```
+
+Only the synthetic source exists so far, so every run is synthetic today.
+Contributed sources arrive in a later step and will become the default.
+
+### Partial load is duty cycling, not fewer threads
+
+`--cpu 50` runs **every** core at a 50% duty cycle. It does not run half the
+cores flat out. Spreading the load keeps the power curve close to linear and
+leaves the closed-loop governor a single scalar to move, which is what makes
+the later wattage target tractable.
+
+Each worker alternates work and sleep on a 5 ms period. Two things make that
+hold a target rather than drift:
+
+- **The cycle boundary is anchored** at `anchor + n * period`, never at "now
+  plus a bit". That fixes the *denominator*: after `n` cycles exactly
+  `n * period` has elapsed. Repeated relative sleeps compound their jitter
+  instead, and the average walks away from the target over minutes.
+- **The work quantum is a debt, measured from arrival.** That fixes the
+  *numerator*, and it is not optional: `mach_wait_until` reliably *over*sleeps,
+  so a worker routinely arrives at a cycle already late. An earlier version
+  measured the work window from the grid start, which silently handed that
+  oversleep back as lost work — and because oversleep is one-sided, the loss
+  was a systematic undershoot rather than noise. A 25% request measured 10%.
+
+Measured on an M3 Pro, three minutes per point, sampling once a second:
+
+| requested | worker-measured | drift over the final 90 s | cycles abandoned |
+|---|---|---|---|
+| 25% | 25.31% | 0.14 points | 0 |
+| 50% | 50.42% | 0.04 points | 0 |
+| 75% | 75.65% | 0.07 points | 0 |
+
+"Worker-measured" is busy time over elapsed time, recorded inside the worker
+loops. It is the honest measure of the duty cycler because it excludes
+whatever else the machine is doing. `stressd run` reports it beside the
+system-wide figure from `host_processor_info`, and the gap between them is the
+rest of your machine.
+
+### Timer coalescing, and a tradeoff you should know about
+
+macOS coalesces timer wake-ups to save power, and how aggressively depends on
+the thread's QoS class. Median overshoot on a requested 2.5 ms sleep, M3 Pro:
+
+| QoS | default | latency tier 0 |
+|---|---:|---:|
+| `.userInteractive` | 638 µs | 325 µs |
+| `.utility` | 7654 µs | 324 µs |
+| `.background` | 77635 µs | 329 µs |
+
+A 5 ms duty cycle cannot survive a 77 ms overshoot. That is what a
+`.background` worker was really doing: 2.5 ms of work then an 80 ms sleep,
+about 3% duty against a 50% request. Since `.background` is the hint that
+biases work onto efficiency cores, half the pool was affected and the whole
+machine measured roughly half of target.
+
+`THREAD_LATENCY_QOS_POLICY` at tier 0 fixes the timing — but it also lifts the
+thread off the efficiency cores. Six `.background` threads at 50% duty:
+
+| latency tier | overshoot | E-cores | P-cores |
+|---|---:|---:|---:|
+| default | 76880 µs | 58% | 14% |
+| tier 0 | 324 µs | 46% | 62% |
+| tier 1 | 629 µs | 50% | 71% |
+| tier 2 | 1253 µs | 41% | 57% |
+| tier 3 | 8857 µs | 60% | 30% |
+
+Every tier precise enough for a 5 ms period also promotes the thread. There is
+no setting that gives both, so `stressd` asks for low latency only when it
+needs it — when the worker sleeps at all, and when its QoS class coalesces
+badly. **A worker at 100% duty never sleeps, so it keeps the default tier and
+stays exactly where the QoS class puts it.**
+
+```
+$ stressd run --cpu 100 --level efficiency
+      requested Efficiency via .background   ->   observed Performance 10.7%, Efficiency 100.0%
+
+$ stressd run --cpu 50 --level efficiency
+      requested Efficiency via .background   ->   observed Performance 40.8%, Efficiency  47.4%
+      placement relaxed: low latency timers are needed below 100% duty,
+      and they lift threads off the efficiency cores. See README.
+```
+
+Reproduce both tables with `swift Tools/measure-timer-coalescing.swift`.
+
+### The compute is real
+
+The synthetic worker runs dense FP64 that survives `-O`, because a stress
+tester whose loop got optimised away is a stress tester that measures nothing.
+Seven independent pairs advance by a symplectic rotation, `x -= s*y; y += s*x`.
+The map has unit determinant and a trace strictly inside `(-2, 2)`, so the
+state orbits forever: bounded for any iteration count, no overflow, no
+denormals, and — unlike a contraction — never settling on a constant the
+hardware could coast through.
+
+Two checks, both in the test suite and both re-runnable by hand:
+
+```sh
+# 1. Wall time scales with the iteration count. A folded loop would be flat.
+swift test -c release --filter "scales linearly"
+
+# 2. The FMAs are really there, inside a backward branch.
+swift build -c release
+otool -tV -p '_$s9StressKit14CPUFloatKernelV3run10iterationsySi_tF' \
+  .build/release/stressd | grep -c 'fmla.2d'   # 28, with no mov.16b between them
+```
+
 ## Safety
 
 Sustained full load on a Mac is a real thermal event, not a benchmark run.
@@ -185,7 +300,7 @@ Sustained full load on a Mac is a real thermal event, not a benchmark run.
 In build order:
 
 1. ✅ Package scaffold, `CoreTopology`, `stressd topology`
-2. `SyntheticSource` with duty-cycled CPU workers, per-core telemetry, `stressd watch`
+2. ✅ `SyntheticSource` with duty-cycled CPU workers, per-core telemetry, `stressd watch`
 3. Battery and power telemetry, `stressd calibrate`
 4. `BOINCSource` and the synthetic top-up mixing logic
 5. Power governor with a wattage target
