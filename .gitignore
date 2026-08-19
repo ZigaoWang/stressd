@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+Packages/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+.DS_Store
+xcuserdata/
+
+# Package.resolved is committed: stressd ships as an executable and the
+# dependency graph should be reproducible.

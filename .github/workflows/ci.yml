@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          uname -m
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: ${{ runner.os }}-spm-
+
+      - name: Build (debug)
+        run: swift build -v
+
+      - name: Test
+        run: swift test
+
+      # The synthetic workers must survive optimisation. A release build is the
+      # only build where that is true, so it is not optional in CI.
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Smoke test the CLI
+        run: |
+          ./.build/release/stressd --version
+          ./.build/release/stressd topology
+          ./.build/release/stressd topology --json | python3 -m json.tool > /dev/null
+
+  lint:
+    name: swift-format
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint
+        run: swift format lint --recursive --strict Sources Tests Package.swift
