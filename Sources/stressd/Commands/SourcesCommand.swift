@@ -29,14 +29,16 @@ struct SourcesCommand: AsyncParsableCommand {
     let topology = try CoreTopologyDetector().detect()
 
     let boinc = BOINCSource()
+    let folding = FoldingSource()
+    let mlucas = MlucasSource()
     let synthetic = SyntheticSource(topology: topology)
 
-    let boincDetection = await boinc.detect()
-    let syntheticDetection = await synthetic.detect()
-
     let reports = [
-      Self.report(id: "boinc", contributing: true, detection: boincDetection),
-      Self.report(id: "synthetic", contributing: false, detection: syntheticDetection),
+      Self.report(id: "boinc", contributing: true, detection: await boinc.detect()),
+      Self.report(id: "folding", contributing: true, detection: await folding.detect()),
+      Self.report(id: "mlucas", contributing: true, detection: await mlucas.detect()),
+      Self.report(
+        id: "synthetic", contributing: false, detection: await synthetic.detect()),
     ]
 
     if output.json {
