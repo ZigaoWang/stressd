@@ -10,4 +10,14 @@ enum JSONReport {
     let data = try encoder.encode(value)
     return String(decoding: data, as: UTF8.self)
   }
+
+  /// Compact single-line encoding, for streaming output where each sample is
+  /// one newline-delimited JSON object.
+  static func encodeLine<Value: Encodable>(_ value: Value) throws -> String {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    encoder.dateEncodingStrategy = .iso8601
+    let data = try encoder.encode(value)
+    return String(decoding: data, as: UTF8.self)
+  }
 }
