@@ -37,6 +37,19 @@ public enum QoSHint: String, Sendable, Codable, CaseIterable {
     }
   }
 
+  /// The value `pthread_set_qos_class_self_np` takes. Setting QoS on the thread
+  /// itself is what the kernel scheduler reads; setting it on a `Thread` object
+  /// is a convenience that ultimately does the same thing.
+  public var qosClass: qos_class_t {
+    switch self {
+    case .userInteractive: return QOS_CLASS_USER_INTERACTIVE
+    case .userInitiated: return QOS_CLASS_USER_INITIATED
+    case .default: return QOS_CLASS_DEFAULT
+    case .utility: return QOS_CLASS_UTILITY
+    case .background: return QOS_CLASS_BACKGROUND
+    }
+  }
+
   public var qualityOfService: QualityOfService {
     switch self {
     case .userInteractive: return .userInteractive
@@ -44,6 +57,20 @@ public enum QoSHint: String, Sendable, Codable, CaseIterable {
     case .default: return .default
     case .utility: return .utility
     case .background: return .background
+    }
+  }
+
+  /// Whether this class's timer wake-ups are coalesced too aggressively for a
+  /// millisecond-scale duty cycle.
+  ///
+  /// Measured on an M3 Pro, median overshoot on a requested 2.5 ms sleep:
+  /// `.userInteractive` 638 us, `.utility` 7654 us, `.background` 77635 us. The
+  /// first is absorbed by the duty cycler's work-debt accounting; the other two
+  /// are not, and need an explicit low latency tier. See `ThreadTimerPolicy`.
+  public var coalescesTimersAggressively: Bool {
+    switch self {
+    case .userInteractive, .userInitiated, .default: return false
+    case .utility, .background: return true
     }
   }
 
