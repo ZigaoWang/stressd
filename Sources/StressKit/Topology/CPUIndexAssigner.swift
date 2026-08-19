@@ -52,30 +52,61 @@ public enum CPUIndexAssigner {
       return Result(logicalCPUIDsByLevel: [], source: .inferred)
     }
 
-    if let clusterAssignments, !clusterAssignments.isEmpty {
-      let clusters = group(clusterAssignments)
-      if clusters.count == levels.count,
-        clusters.reduce(0, { $0 + $1.cpuIDs.count }) == totalLogicalCores
-      {
-        // Strongest signal first: the cluster type letter names the level.
-        if let matched = matchByClusterName(levels: levels, clusters: clusters) {
-          return Result(logicalCPUIDsByLevel: matched, source: .ioRegistryByClusterName)
-        }
-        // Next: unambiguous core counts.
-        if let matched = matchByCoreCount(levels: levels, clusters: clusters) {
-          return Result(logicalCPUIDsByLevel: matched, source: .ioRegistryByCoreCount)
-        }
-        // Last: cluster ordering. Apple numbers the slowest cluster first, so
-        // reversing gives fastest-first to line up with hw.perflevelN.
-        if let matched = matchByClusterOrder(levels: levels, clusters: clusters) {
-          return Result(logicalCPUIDsByLevel: matched, source: .ioRegistryByClusterOrder)
-        }
-      }
-    }
-
-    return Result(
+    let inferred = Result(
       logicalCPUIDsByLevel: inferContiguousBlocks(levels: levels, total: totalLogicalCores),
       source: .inferred)
+
+    guard let clusterAssignments, !clusterAssignments.isEmpty else { return inferred }
+
+    let clusters = group(clusterAssignments)
+
+    // An unrecognised cluster-type means this is hardware the matcher was not
+    // written for. Guessing at it would silently mislabel every per-core
+    // reading, so degrade to the inferred layout and say so.
+    guard clusters.allSatisfy({ isRecognisedClusterType($0.type) }) else { return inferred }
+    guard clusters.count == levels.count else { return inferred }
+    guard clusters.reduce(0, { $0 + $1.cpuIDs.count }) == totalLogicalCores else {
+      return inferred
+    }
+
+    // Ordered by how much evidence each strategy rests on. The cluster type
+    // letter naming the level is the strongest; cluster ordering is the
+    // weakest and only fires when the other two cannot separate the levels.
+    let strategies: [(source: CPUIndexMappingSource, match: MatchStrategy)] = [
+      (.ioRegistryByClusterName, matchByClusterName),
+      (.ioRegistryByCoreCount, matchByCoreCount),
+      (.ioRegistryByClusterOrder, matchByClusterOrder),
+    ]
+
+    for (source, match) in strategies {
+      guard let matched = match(levels, clusters) else { continue }
+      guard isBijection(matched, totalLogicalCores: totalLogicalCores) else { continue }
+      return Result(logicalCPUIDsByLevel: matched, source: source)
+    }
+    return inferred
+  }
+
+  /// Attempts to pair performance levels with device tree clusters, returning
+  /// `nil` when this strategy cannot separate them.
+  typealias MatchStrategy = ([LevelSpec], [Cluster]) -> [[Int]]?
+
+  /// Cluster-type values this matcher understands. Apple's device tree uses
+  /// exactly `"P"` and `"E"`; anything else is unknown hardware.
+  static let recognisedClusterTypes: Set<String> = ["P", "E"]
+
+  static func isRecognisedClusterType(_ type: String) -> Bool {
+    recognisedClusterTypes.contains(type.uppercased())
+  }
+
+  /// Whether a candidate mapping covers `0..<totalLogicalCores` exactly once.
+  ///
+  /// Per-core telemetry indexes arrays by logical CPU number, so a mapping that
+  /// duplicates, omits, or overruns an index is worse than no mapping at all.
+  static func isBijection(_ mapping: [[Int]], totalLogicalCores: Int) -> Bool {
+    let flattened = mapping.flatMap { $0 }
+    guard flattened.count == totalLogicalCores else { return false }
+    guard Set(flattened).count == totalLogicalCores else { return false }
+    return flattened.allSatisfy { (0..<totalLogicalCores).contains($0) }
   }
 
   // MARK: - Cluster grouping
@@ -159,6 +190,12 @@ public enum CPUIndexAssigner {
   /// Lays out contiguous blocks assuming the slowest level owns the lowest
   /// logical CPU numbers, which is how every Apple silicon part shipped so far
   /// is numbered.
+  ///
+  /// Blocks are allocated from 0 upwards and clamped to `total`, so the result
+  /// can never duplicate a logical CPU number or name one that does not exist.
+  /// If the level sizes do not add up to `total` the tail is simply left
+  /// unmapped: incomplete coverage is a safe failure, misattributed coverage is
+  /// not.
   static func inferContiguousBlocks(levels: [LevelSpec], total: Int) -> [[Int]] {
     var blocks = [[Int]](repeating: [], count: levels.count)
     var cursor = 0

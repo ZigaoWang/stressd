@@ -110,9 +110,42 @@ tells you which strategy produced it:
 | `ioRegistryByClusterName` | Cluster type letter matched the level name (`P` → Performance) |
 | `ioRegistryByCoreCount` | Cluster sizes were unambiguous |
 | `ioRegistryByClusterOrder` | Matched by cluster ordering |
-| `inferred` | Device tree unreachable; assumed slowest-numbered-first |
+| `inferred` | No usable device tree data; see below |
 
 Only the last one is an assumption, and it says so.
+
+Whichever strategy wins, the result is validated as a bijection before it is
+accepted: every logical CPU number from `0` to `hw.logicalcpu - 1` must appear
+exactly once. Per-core telemetry indexes arrays by logical CPU number, so a map
+that duplicates or omits an index is worse than no map at all. A map that fails
+validation is discarded in favour of the inferred layout.
+
+### What `inferred` assumes
+
+The inferred layout is used when the IORegistry cannot be read, when it reports
+a `cluster-type` other than `P` or `E`, when the number of clusters does not
+equal the number of performance levels, or when the resulting map fails
+validation. It assumes:
+
+1. **Logical CPU numbers are assigned slowest class first.** The last
+   performance level (the slowest, highest `N` in `hw.perflevelN`) owns logical
+   CPUs starting at 0; the fastest level owns the highest numbers. This holds on
+   every Apple silicon part shipped to date but is not documented by Apple and
+   is not contractual.
+2. **Each performance level occupies one contiguous run of logical CPU
+   numbers**, laid out in `hw.perflevelN` order.
+3. **Logical CPU numbers start at 0 and are dense.**
+
+The layout is allocated from 0 upwards and clamped to `hw.logicalcpu`, so it can
+never duplicate a CPU number or name one that does not exist. If the level sizes
+do not add up, the tail is left unmapped rather than misattributed: incomplete
+coverage is a safe failure, wrong coverage is not.
+
+Assumption 1 is the one that matters. If it is ever wrong, `stressd` will label
+P-core load as E-core load and vice versa — which is precisely why the device
+tree is consulted first, and why `stressd topology` prints which source it
+used. If yours says `inferred`, the numbers are still usable but the
+Performance / Efficiency labels are an educated guess.
 
 ### QoS is a hint, not affinity
 
