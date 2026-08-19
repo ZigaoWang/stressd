@@ -33,8 +33,22 @@ struct RunCommand: AsyncParsableCommand {
     help: "Cores to load: 'all', 'performance', 'efficiency', or a performance level index.")
   var level: String = "all"
 
-  @Flag(name: .long, help: "Do not use contributed work. Currently implied.")
+  @Flag(name: .long, help: "Do not use contributed work; generate synthetic load only.")
   var syntheticOnly = false
+
+  @Flag(
+    name: .long,
+    help: "Use only contributed work. Do not top up with synthetic; report the shortfall.")
+  var contributedOnly = false
+
+  @Option(
+    name: .long,
+    help: "Most the synthetic duty cycle may move per second, in percentage points.")
+  var slewRate: Double = 10
+
+  @Option(
+    name: .long, help: "Ignore utilization errors smaller than this, in percentage points.")
+  var deadband: Double = 3
 
   @Option(
     name: .long,
@@ -60,6 +74,15 @@ struct RunCommand: AsyncParsableCommand {
   func validate() throws {
     guard cpu >= 0, cpu <= 100 else {
       throw ValidationError("--cpu must be between 0 and 100")
+    }
+    guard !(syntheticOnly && contributedOnly) else {
+      throw ValidationError("--synthetic-only and --contributed-only are mutually exclusive")
+    }
+    guard slewRate > 0, slewRate <= 100 else {
+      throw ValidationError("--slew-rate must be between 0 and 100 points per second")
+    }
+    guard deadband >= 0, deadband <= 50 else {
+      throw ValidationError("--deadband must be between 0 and 50 points")
     }
     if let periodMilliseconds {
       guard periodMilliseconds >= 0.5, periodMilliseconds <= 1000 else {
@@ -89,6 +112,25 @@ struct RunCommand: AsyncParsableCommand {
     // the process under any exit path.
     CleanupRegistry.shared.register("stop synthetic workers") { source.emergencyStop() }
 
+    // Contributed sources come first: their FLOPs are the ones worth
+    // generating, so they get first claim on the budget and synthetic fills
+    // whatever is left.
+    var boinc: BOINCSource?
+    if !syntheticOnly {
+      let candidate = BOINCSource()
+      if await candidate.detect().isAvailable {
+        boinc = candidate
+        // Restores run mode and global_prefs_override.xml on every exit path.
+        CleanupRegistry.shared.register("restore BOINC settings") {
+          candidate.emergencyRestore()
+        }
+      } else if contributedOnly {
+        throw ValidationError(
+          "--contributed-only was given but no contributed source is available. "
+            + "Run 'stressd sources' for install instructions.")
+      }
+    }
+
     let renderer = InPlaceRenderer()
     CleanupRegistry.shared.register("restore cursor") { renderer.finish() }
 
@@ -98,21 +140,42 @@ struct RunCommand: AsyncParsableCommand {
     let baseline = try await Self.measureBaseline(
       topology: topology, seconds: baselineSeconds, json: output.json)
 
-    try await source.start(budget: budget)
+    let mixer = LoadMixer(
+      topology: topology,
+      budget: budget,
+      synthetic: source,
+      contributed: boinc.map { [$0] } ?? [],
+      boinc: boinc,
+      configuration: MixerConfiguration(
+        slewRatePerSecond: slewRate / 100,
+        deadband: deadband / 100,
+        interval: interval),
+      allowSyntheticTopUp: !contributedOnly)
+    await mixer.setBaseline(baseline ?? 0)
+    try await mixer.start()
 
     let monitor = TelemetryMonitor(
       topology: topology, interval: interval, power: PowerMonitor())
-    await monitor.observe([source])
+    await monitor.observe(boinc.map { [source, $0] } ?? [source])
     let emitJSON = output.json
+    var lastTick = Date()
 
     let work = Task {
       for await telemetry in await monitor.stream() {
+        // The mixing step: measure what is happening, then close the gap with
+        // synthetic load. Never respawns; adjust changes duty on live threads.
+        let now = Date()
+        let split = await mixer.tick(
+          observed: telemetry.cpu, elapsed: now.timeIntervalSince(lastTick))
+        lastTick = now
+
         if emitJSON {
-          print(try JSONReport.encodeLine(telemetry))
+          print(try JSONReport.encodeLine(telemetry.merging(split)))
         } else {
           renderer.render(
             TelemetryRenderer.frame(
-              telemetry, topology: topology, width: Terminal.columns, baseline: baseline))
+              telemetry, topology: topology, width: Terminal.columns, baseline: baseline,
+              mix: split))
         }
         // Thermal back-off belongs here, between reading the state and the next
         // adjust(). It arrives with the governor in a later step; today the
@@ -127,14 +190,15 @@ struct RunCommand: AsyncParsableCommand {
     _ = try? await work.value
 
     let finalStatus = source.nonisolatedStatus()
-    await source.stop()
+    let finalMix = await mixer.latest()
+    await mixer.stop()
     CleanupRegistry.shared.run()
 
     if !emitJSON {
       print(
         Self.summary(
           status: finalStatus, elapsed: Date().timeIntervalSince(startedAt),
-          baseline: baseline))
+          baseline: baseline, mix: finalMix))
     }
   }
 
@@ -182,10 +246,8 @@ struct RunCommand: AsyncParsableCommand {
   }
 
   static func summary(
-    status: SourceStatus, elapsed: TimeInterval, baseline: Double?
-  )
-    -> String
-  {
+    status: SourceStatus, elapsed: TimeInterval, baseline: Double?, mix: LoadMixer.Sample?
+  ) -> String {
     var lines = ["", "Session"]
     lines.append(Formatting.field("  Duration", DurationParser.format(elapsed), keyWidth: 20))
     lines.append(
@@ -209,8 +271,23 @@ struct RunCommand: AsyncParsableCommand {
     if let abandoned = status.detail["abandonedCycles"], abandoned != "0" {
       lines.append(Formatting.field("  Abandoned cycles", abandoned, keyWidth: 20))
     }
+    if let mix {
+      lines.append(
+        Formatting.field(
+          "  Contributed",
+          TelemetryRenderer.percent(mix.split.contributedFraction)
+            + " of measured load", keyWidth: 20))
+      if let reason = mix.contributedIdleReason {
+        lines.append(Formatting.field("  Contributed idle", reason, keyWidth: 20))
+      }
+    }
     lines.append("")
-    lines.append("  No work was contributed: the synthetic source computes nothing useful.")
+    if (mix?.split.contributedFraction ?? 0) < 0.001 {
+      lines.append("  No work was contributed: the synthetic source computes nothing useful.")
+    } else {
+      lines.append(
+        "  Contributed work went to a real project. Synthetic load computed nothing.")
+    }
     return lines.joined(separator: "\n")
   }
 }

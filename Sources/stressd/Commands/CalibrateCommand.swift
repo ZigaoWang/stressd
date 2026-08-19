@@ -147,9 +147,11 @@ struct CalibrateCommand: AsyncParsableCommand {
 
   static func describe(_ progress: CalibrationProgress) -> String? {
     switch progress {
-    case .started(let total, let seconds, let source):
+    case .started(let total, let seconds, let worstCase, let source):
       return """
-        Calibrating \(total) points, up to \(DurationParser.format(seconds)).
+        Calibrating \(total) points. Expect \(DurationParser.format(seconds)), \
+        up to \(DurationParser.format(worstCase)) if the machine stays warm \
+        and every cooldown runs to its cap.
         Power source: \(source.explanation)
         Measurement order is randomised so accumulated heat does not correlate \
         with load.

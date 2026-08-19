@@ -36,10 +36,23 @@ public struct CalibrationPlan: Sendable, Equatable {
     self.shuffleSeed = shuffleSeed
   }
 
-  /// Worst-case wall time, so the user can be told up front what they are in
-  /// for. Assumes every cooldown runs to the floor rather than to `.nominal`.
+  /// Wall time if every cooldown finishes at the floor.
+  ///
+  /// The optimistic figure. A machine that stays above `.nominal` under load
+  /// waits up to `maximumCooldownSeconds` at every point instead, which is
+  /// what `worstCaseSeconds` reports.
   public var estimatedSeconds: Double {
     let perPoint = settleSeconds + dwellSeconds + cooldownSeconds
+    return Double(points.count) * perPoint + baselineSeconds
+  }
+
+  /// Wall time if the machine never returns to `.nominal`.
+  ///
+  /// Worth quoting alongside the estimate: measured on an M3 Pro, a sweep whose
+  /// optimistic estimate was 24 minutes took over 40, because sustained load
+  /// held the thermal state at `.fair` and every cooldown ran to its cap.
+  public var worstCaseSeconds: Double {
+    let perPoint = settleSeconds + dwellSeconds + maximumCooldownSeconds
     return Double(points.count) * perPoint + baselineSeconds
   }
 
@@ -86,7 +99,9 @@ struct SplitMix64 {
 
 /// Progress reported while a sweep runs.
 public enum CalibrationProgress: Sendable {
-  case started(totalPoints: Int, estimatedSeconds: Double, powerSource: PowerCurve.Source)
+  case started(
+    totalPoints: Int, estimatedSeconds: Double, worstCaseSeconds: Double,
+    powerSource: PowerCurve.Source)
   case baseline(utilization: Double, watts: Double?)
   case cooling(pointIndex: Int, totalPoints: Int, thermalState: ThermalState, waited: Double)
   case settling(pointIndex: Int, totalPoints: Int, load: Double)
@@ -148,7 +163,7 @@ public actor PowerCalibrator {
     onProgress(
       .started(
         totalPoints: order.count, estimatedSeconds: plan.estimatedSeconds,
-        powerSource: powerSource))
+        worstCaseSeconds: plan.worstCaseSeconds, powerSource: powerSource))
     onProgress(.baseline(utilization: baseline.utilization, watts: baseline.watts))
 
     var measured: [CalibrationPoint] = []
