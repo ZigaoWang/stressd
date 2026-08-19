@@ -33,8 +33,13 @@ jobs:
       - name: Build (debug)
         run: swift build -v
 
+      # Integration tests put the machine under real load for tens of seconds
+      # and assert on observed utilization, which a shared CI runner cannot
+      # deliver. They run by default everywhere else.
       - name: Test
         run: swift test
+        env:
+          STRESSD_SKIP_INTEGRATION_TESTS: "1"
 
       # The synthetic workers must survive optimisation. A release build is the
       # only build where that is true, so it is not optional in CI.
@@ -46,6 +51,8 @@ jobs:
           ./.build/release/stressd --version
           ./.build/release/stressd topology
           ./.build/release/stressd topology --json | python3 -m json.tool > /dev/null
+          ./.build/release/stressd watch --duration 3s --json | tail -1 | python3 -m json.tool > /dev/null
+          ./.build/release/stressd run --cpu 20 --duration 5s --json | tail -1 | python3 -m json.tool > /dev/null
 
   lint:
     name: swift-format
