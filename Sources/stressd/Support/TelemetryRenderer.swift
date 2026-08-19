@@ -7,7 +7,8 @@ enum TelemetryRenderer {
   /// Full frame: per-core bars, per-level aggregates, and — when load is
   /// running — requested duty cycle beside observed utilization.
   static func frame(
-    _ telemetry: Telemetry, topology: CoreTopology, width: Int, baseline: Double? = nil
+    _ telemetry: Telemetry, topology: CoreTopology, width: Int, baseline: Double? = nil,
+    mix: LoadMixer.Sample? = nil
   ) -> [String] {
     var lines: [String] = []
     lines.append(header(telemetry, topology: topology))
@@ -16,6 +17,11 @@ enum TelemetryRenderer {
     lines.append("")
     lines.append(contentsOf: byLevel(telemetry))
 
+    if let mix {
+      lines.append("")
+      lines.append(contentsOf: mixSection(mix, width: width))
+    }
+
     lines.append("")
     lines.append(contentsOf: powerSection(telemetry))
 
@@ -23,6 +29,36 @@ enum TelemetryRenderer {
     if !sources.isEmpty {
       lines.append("")
       lines.append(contentsOf: load(sources, telemetry: telemetry, baseline: baseline))
+    }
+    return lines
+  }
+
+  /// Contributed versus synthetic load, as separate bars.
+  static func mixSection(_ mix: LoadMixer.Sample, width: Int) -> [String] {
+    let barWidth = max(10, min(40, width - 44))
+    var lines = ["  Mix   target \(percent(mix.target))   baseline \(percent(mix.baseline))"]
+
+    lines.append(
+      "    contributed  \(bar(mix.split.contributedUtilization, width: barWidth)) "
+        + "\(percent(mix.split.contributedUtilization))   real work")
+    lines.append(
+      "    synthetic    \(bar(mix.split.syntheticUtilization, width: barWidth)) "
+        + "\(percent(mix.split.syntheticUtilization))   computes nothing")
+    lines.append(
+      "    total        \(bar(mix.split.totalUtilization, width: barWidth)) "
+        + "\(percent(mix.split.totalUtilization))   over baseline")
+
+    var notes: [String] = []
+    notes.append("duty \(percent(mix.decision.syntheticDuty))")
+    if mix.decision.withinDeadband { notes.append("holding (within deadband)") }
+    if mix.decision.slewLimited { notes.append("slew limited") }
+    if mix.decision.contributedOverTarget { notes.append("contributed over target") }
+    lines.append("    synthetic requested: " + notes.joined(separator: ", "))
+
+    if let reason = mix.contributedIdleReason {
+      // Surfaced rather than silently substituted: the user should know the
+      // work they wanted to contribute is not happening.
+      lines.append("    contributed idle: \(reason); synthetic is covering the target")
     }
     return lines
   }
@@ -172,7 +208,12 @@ enum TelemetryRenderer {
           .joined(separator: ", ")
         lines.append("      requested \(placement) via .\(hint)   ->   observed \(observed)")
         if let periods = source.detail["periodsMs"], !periods.isEmpty {
-          lines.append("      duty cycle period per level: \(periods) ms")
+          var line = "      duty cycle period per level: \(periods) ms"
+          if let measured = source.detail["coalescingMs"], !measured.isEmpty {
+            // The period is derived from this, not hardcoded.
+            line += "   (measured coalescing \(measured) ms)"
+          }
+          lines.append(line)
         }
       }
       if let abandoned = source.detail["abandonedCycles"], abandoned != "0" {

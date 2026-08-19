@@ -30,6 +30,9 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
     public let placement: Placement
     public let workers: [WorkerSample]
     public let isRunning: Bool
+    /// Live period per performance level, which can differ from the one the
+    /// pool was built with if it has been re-measured.
+    public let periodNanosecondsByLevel: [Int: UInt64]
 
     /// Duty cycle achieved across all workers, measured inside the loops.
     public var achievedDutyCycle: Double? {
@@ -53,6 +56,9 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
 
   private let clock: any MonotonicClock
   private let periodOverride: UInt64?
+  private let periodPolicy: PeriodPolicy
+  /// One atomic per performance level, shared with that level's workers.
+  private let periodCells: [Int: AtomicUInt64]
   private let dutyCycle = AtomicDouble(0)
   private let isRunningFlag = AtomicFlag(false)
   private let gate: WorkerGate
@@ -69,14 +75,18 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
   ///   - periodNanoseconds: Overrides the per-level period. Leave `nil` to use
   ///     the period each level's QoS class needs, which is what holds the duty
   ///     cycle without disturbing core placement.
+  ///   - periodPolicy: Measures the timer coalescing window so the period can be
+  ///     derived from the running machine rather than hardcoded.
   ///   - clock: Injected so scheduling can be exercised without real threads.
   public init(
     topology: CoreTopology,
     levelIndex: Int?,
     periodNanoseconds: UInt64? = nil,
+    periodPolicy: PeriodPolicy = PeriodPolicy(),
     clock: any MonotonicClock = MachMonotonicClock()
   ) {
     self.clock = clock
+    self.periodPolicy = periodPolicy
     self.periodOverride = periodNanoseconds.map {
       max($0, DutyCycleScheduler.minimumPeriodNanoseconds)
     }
@@ -92,14 +102,17 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
     var built: [SyntheticWorker] = []
     var targeted: [Int] = []
     var periods: [Int: UInt64] = [:]
+    var cells: [Int: AtomicUInt64] = [:]
     for level in levels {
       targeted.append(contentsOf: level.logicalCPUIDs)
-      // Each level gets the period its QoS class needs. A .background level
-      // whose timers coalesce by tens of milliseconds cannot hold a target on a
-      // 5 ms period, and sharpening its timers instead would move the work off
-      // the efficiency cores.
-      let period = self.periodOverride ?? level.qosHint.recommendedPeriodNanoseconds
+      // Each level gets the period its QoS class needs, measured rather than
+      // assumed: a level whose timers coalesce by tens of milliseconds cannot
+      // hold a target on a 5 ms period, and sharpening its timers instead would
+      // move the work off the efficiency cores.
+      let period = self.periodOverride ?? periodPolicy.period(for: level.qosHint)
       periods[level.index] = period
+      let cell = AtomicUInt64(period)
+      cells[level.index] = cell
       // One thread per logical core on the level, regardless of the duty cycle.
       for _ in 0..<level.logicalCoreCount {
         built.append(
@@ -107,7 +120,7 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
             logicalIndex: built.count,
             performanceLevelIndex: level.index,
             qosHint: level.qosHint,
-            periodNanoseconds: period,
+            periodNanoseconds: cell,
             clock: clock,
             dutyCycle: dutyCycle,
             isRunning: isRunningFlag,
@@ -115,6 +128,7 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
       }
     }
     self.workers = built
+    self.periodCells = cells
     self.periodsByLevel = periods
 
     self.placement = Placement(
@@ -188,12 +202,48 @@ public final class SyntheticWorkerPool: @unchecked Sendable {
     }
   }
 
+  /// Re-measures the coalescing window and updates the live workers' periods.
+  ///
+  /// Called when the power state changes, since Low Power Mode and running on
+  /// battery both alter how the scheduler behaves. Changes the period on the
+  /// existing threads; nothing is respawned.
+  ///
+  /// - Returns: The new period per level, when it changed.
+  @discardableResult
+  public func remeasurePeriods(topology: CoreTopology) -> [Int: UInt64] {
+    guard periodOverride == nil else { return [:] }
+    periodPolicy.invalidate()
+
+    var changed: [Int: UInt64] = [:]
+    for level in topology.performanceLevels {
+      guard let cell = periodCells[level.index] else { continue }
+      let period = periodPolicy.period(for: level.qosHint)
+      if cell.load() != period {
+        cell.store(period)
+        changed[level.index] = period
+      }
+    }
+    return changed
+  }
+
+  /// The period each level is currently running at.
+  public func currentPeriods() -> [Int: UInt64] {
+    periodCells.mapValues { $0.load() }
+  }
+
+  /// The coalescing window measured for a level's QoS class, when it was
+  /// probed. Reported so the chosen period is explainable.
+  public func measuredOvershoot(for hint: QoSHint) -> UInt64? {
+    periodPolicy.measuredOvershoot(for: hint)
+  }
+
   public func snapshot() -> Snapshot {
     Snapshot(
       requestedDutyCycle: dutyCycle.load(),
       placement: placement,
       workers: workers.map { $0.statistics.snapshot() },
-      isRunning: isRunningFlag.value)
+      isRunning: isRunningFlag.value,
+      periodNanosecondsByLevel: currentPeriods())
   }
 
   private static func clamp(_ value: Double) -> Double {

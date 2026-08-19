@@ -38,6 +38,7 @@ public actor SyntheticSource: LoadSource {
 
   private let topology: CoreTopology
   private let periodNanoseconds: UInt64?
+  private let periodPolicy = PeriodPolicy()
   private let clock: any MonotonicClock
   private nonisolated let box = PoolBox()
 
@@ -72,6 +73,7 @@ public actor SyntheticSource: LoadSource {
       topology: topology,
       levelIndex: budget.placement.levelIndex,
       periodNanoseconds: periodNanoseconds,
+      periodPolicy: periodPolicy,
       clock: clock)
     box.replace(with: pool)
     pool.start(dutyCycle: budget.cpu)
@@ -127,11 +129,22 @@ public actor SyntheticSource: LoadSource {
         "targetedCPUs": snapshot.placement.targetedLogicalCPUs.map(String.init)
           .joined(separator: ","),
         "abandonedCycles": String(snapshot.abandonedCycles),
-        "periodsMs": snapshot.placement.periodNanosecondsByLevel.keys.sorted()
-          .map { "L\($0):\((snapshot.placement.periodNanosecondsByLevel[$0] ?? 0) / 1_000_000)" }
+        "coalescingMs": QoSHint.allCases.compactMap { hint -> String? in
+          guard let measured = box.current?.measuredOvershoot(for: hint) else { return nil }
+          return String(format: "%@:%.1f", hint.rawValue, Double(measured) / 1e6)
+        }.joined(separator: " "),
+        "periodsMs": snapshot.periodNanosecondsByLevel.keys.sorted()
+          .map { "L\($0):\((snapshot.periodNanosecondsByLevel[$0] ?? 0) / 1_000_000)" }
           .joined(separator: " "),
         "gflops": String(format: "%.1f", Self.gigaflops(snapshot: snapshot)),
       ])
+  }
+
+  /// Re-measures the timer coalescing window and updates live worker periods.
+  /// Call when the power state changes.
+  @discardableResult
+  public func remeasurePeriods() -> [Int: UInt64] {
+    box.current?.remeasurePeriods(topology: topology) ?? [:]
   }
 
   /// A read of the pool's own counters, for callers that want more than

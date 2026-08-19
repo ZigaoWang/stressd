@@ -72,8 +72,12 @@ public enum QoSHint: String, Sendable, Codable, CaseIterable {
     }
   }
 
-  /// The duty cycle period that holds a target on this QoS class *without*
-  /// disturbing where the scheduler puts the work.
+  /// Fallback duty cycle period when the coalescing window has not been
+  /// measured.
+  ///
+  /// Prefer `PeriodPolicy`, which measures the window on the running machine.
+  /// This value is what that measurement produced on an M3 Pro under macOS 26,
+  /// kept as a sane default for the paths that cannot probe.
   ///
   /// ## Why the two levels differ
   ///
@@ -84,10 +88,9 @@ public enum QoSHint: String, Sendable, Codable, CaseIterable {
   /// the thread off the efficiency cores, which defeats the reason the worker
   /// asked for `.background` in the first place.
   ///
-  /// Lengthening the period fixes it with no such cost. The work-debt model
-  /// absorbs an overshoot that is small relative to the period, so the question
-  /// is only how long the period has to be. Measured on an M3 Pro with six
-  /// `.background` threads and no latency tier, P-core bleed at idle is ~13%:
+  /// Lengthening the period fixes it with no such cost. Measured on an M3 Pro
+  /// with six `.background` threads and no latency tier, P-core bleed at idle
+  /// being ~13%:
   ///
   /// | period | duty at 25% | duty at 50% | P-cores at 50% |
   /// |--------|------------:|------------:|---------------:|
@@ -98,12 +101,12 @@ public enum QoSHint: String, Sendable, Codable, CaseIterable {
   /// | 200 ms |       24.8% |       50.1% |          14.9% |
   ///
   /// For comparison, 5 ms with latency tier 0 hits the duty target exactly but
-  /// pushes P-core usage to 59% — the work is no longer on the efficiency
-  /// cores at all.
+  /// pushes P-core usage to 59%: the work is no longer on the efficiency cores
+  /// at all.
   ///
-  /// 100 ms is the knee: the target is met and placement is untouched. Coarse
-  /// granularity is the right trade for background work, and nothing in the
-  /// duty cycler depends on the period being short.
+  /// 100 ms is the knee *on that machine*, and it is the knee because it
+  /// exceeds the 77 ms coalescing window — the knee tracks the window, not a
+  /// constant, which is why `PeriodPolicy` derives it from a measurement.
   ///
   /// Reproduce with `swift Tools/measure-timer-coalescing.swift`.
   public var recommendedPeriodNanoseconds: UInt64 {

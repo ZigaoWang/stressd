@@ -34,13 +34,14 @@ final class SyntheticWorker: @unchecked Sendable {
   private let dutyCycle: AtomicDouble
   private let isRunning: AtomicFlag
   private let gate: WorkerGate
-  private let periodNanoseconds: UInt64
+  /// Read every cycle so a re-measured period takes effect on the live thread.
+  private let periodNanoseconds: AtomicUInt64
 
   init(
     logicalIndex: Int,
     performanceLevelIndex: Int,
     qosHint: QoSHint,
-    periodNanoseconds: UInt64,
+    periodNanoseconds: AtomicUInt64,
     clock: any MonotonicClock,
     dutyCycle: AtomicDouble,
     isRunning: AtomicFlag,
@@ -70,8 +71,9 @@ final class SyntheticWorker: @unchecked Sendable {
 
     var kernel = CPUFloatKernel(seed: UInt64(logicalIndex &+ 1))
     var estimator = IterationRateEstimator()
+    var activePeriod = periodNanoseconds.load()
     var scheduler = DutyCycleScheduler(
-      anchor: clock.nanoseconds(), periodNanoseconds: periodNanoseconds)
+      anchor: clock.nanoseconds(), periodNanoseconds: activePeriod)
 
     var cycleStart = clock.nanoseconds()
 
@@ -87,6 +89,14 @@ final class SyntheticWorker: @unchecked Sendable {
         scheduler.reanchor(to: cycleStart)
         target = dutyCycle.load()
         if target <= 0 { continue }
+      }
+
+      // A re-measured period rebuilds the scheduler on this thread rather than
+      // replacing the thread. Rare: only when the power state changes.
+      let requestedPeriod = periodNanoseconds.load()
+      if requestedPeriod != activePeriod {
+        activePeriod = requestedPeriod
+        scheduler = DutyCycleScheduler(anchor: cycleStart, periodNanoseconds: activePeriod)
       }
 
       let cycle = scheduler.nextCycle(now: cycleStart, dutyCycle: target)
