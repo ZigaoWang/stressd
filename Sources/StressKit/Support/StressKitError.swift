@@ -23,6 +23,10 @@ public enum StressKitError: Error, Equatable, Sendable {
   case processorInfoTruncated(expected: Int, received: Int)
   /// A sleep assertion could not be taken.
   case powerAssertionFailed(kernReturn: Int32)
+  /// The BOINC client is not installed or not reachable.
+  case boincUnavailable(String)
+  /// A boinccmd invocation failed.
+  case boincCommandFailed(command: String, detail: String)
 }
 
 extension StressKitError: CustomStringConvertible {
@@ -46,6 +50,10 @@ extension StressKitError: CustomStringConvertible {
       return "host_processor_info returned \(received) values, expected \(expected)"
     case .powerAssertionFailed(let code):
       return "IOPMAssertionCreateWithName failed with IOReturn \(code)"
+    case .boincUnavailable(let detail):
+      return "BOINC unavailable: \(detail)"
+    case .boincCommandFailed(let command, let detail):
+      return "boinccmd \(command) failed: \(detail)"
     }
   }
 }
