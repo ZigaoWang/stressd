@@ -60,6 +60,19 @@ enum TestHost {
       return false
     #endif
   }
+
+  /// Whether the IORegistry exposes CPU `cluster-type` properties.
+  ///
+  /// Distinct from `isAppleSilicon`, and the difference is not hypothetical:
+  /// GitHub's macOS runners are virtualised Apple silicon, where sysctl
+  /// reports performance levels but the guest device tree has no CPU nodes at
+  /// all. That is precisely the case the inferred CPU index mapping exists to
+  /// handle, so it is a supported configuration rather than a failure — but a
+  /// test that requires real device tree data cannot run there.
+  static var hasCPUClusterDeviceTree: Bool {
+    guard isAppleSilicon else { return false }
+    return (try? IORegistryCPUClusterMap().assignments())?.isEmpty == false
+  }
 }
 
 /// These exercise the real kernel. They are skipped anywhere that is not a
@@ -84,6 +97,9 @@ struct LiveSysctlTests {
 
     #expect(topology.logicalCoreCount > 0)
     #expect(topology.chipName?.isEmpty == false)
+    // Deliberately not asserting the mapping is authoritative: on a virtualised
+    // host there is no device tree and the inferred layout is the correct
+    // outcome. The invariants below have to hold either way.
     #expect(
       topology.performanceLevels.reduce(0) { $0 + $1.logicalCoreCount }
         == topology.logicalCoreCount)
@@ -93,7 +109,9 @@ struct LiveSysctlTests {
     #expect(cpus.allSatisfy { (0..<topology.logicalCoreCount).contains($0) })
   }
 
-  @Test("The device tree exposes cluster types for every logical CPU")
+  @Test(
+    "The device tree exposes cluster types for every logical CPU",
+    .enabled(if: TestHost.hasCPUClusterDeviceTree))
   func liveClusterMap() throws {
     let assignments = try IORegistryCPUClusterMap().assignments()
     let logicalCount = Int(try LiveSysctl().integer("hw.logicalcpu"))
