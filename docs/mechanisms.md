@@ -154,7 +154,7 @@ find, and no settling window is required.
 
 ### The measurement I could not reproduce
 
-One earlier run measured the opposite — six `.userInteractive` threads pinning
+One run measured the opposite — six `.userInteractive` threads pinning
 cpu0–5 (E) at 100% while cpu6–11 (P) sat near zero. I took that at face value
 and rewrote this section and the README around it. That was a mistake: it was a
 single 5-second sample, and it is now contradicted by seven runs.
@@ -165,13 +165,29 @@ Deliberate attempts to reproduce it all failed:
   100% load gave P = 93.0%, unchanged.
 - **Launch context**: run detached from a subshell, the way the outlier was
   launched, gave P = 94.8% against 96.1% in the foreground.
-- **Machine load**: baseline varied from 26% to 57% across tonight's runs with
-  no effect on the ordering.
+- **Machine load**: baseline varied from 26% to 57% across runs with no effect
+  on the ordering.
 
 I do not know what produced it. The honest reading is that it was a
 contaminated or unlucky sample, and that the behaviour documented above is the
 real one. It is recorded here rather than deleted because an unexplained
 observation is worth more in the open than quietly dropped.
+
+Rather than keep chasing it, the tool now instruments for it. Every run prints
+its scheduling context first: task role, effective QoS read back from each
+worker thread, timer latency tier, Darwin process priority, thermal state and
+Low Power Mode at both ends, TTY status, and the parent process name.
+
+**The leading unchecked hypothesis is the task role.** A thread's QoS reading
+back as `USER_INTERACTIVE` does not make the task eligible for performance
+cores; `TASK_BACKGROUND_APPLICATION` and `TASK_NONUI_APPLICATION` clamp
+effective scheduling at the task level regardless of what any thread requests,
+and that was never measured during the anomalous run. **If the task-role
+hypothesis is the explanation, a future reproduction will print `taskRole` as
+`TASK_BACKGROUND_APPLICATION` or `TASK_NONUI_APPLICATION` while `workerQoS`
+still reads `USER_INTERACTIVE`** — requested QoS intact, task-level eligibility
+withdrawn. Every run recorded so far prints `TASK_UNSPECIFIED`, which does not
+carry that clamp.
 
 stressd always reports observed per-core utilization next to requested
 placement, which is what made both the error and its correction visible.

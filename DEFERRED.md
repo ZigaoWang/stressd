@@ -184,23 +184,26 @@ source notification.
 
 ---
 
-## 8. Core placement from an interactive session
+## 8. Core placement on other hardware
 
-**Needs:** running a script from a normal Terminal window.
+**Needs:** a machine that is not an M3 Pro.
 
-Late measurements showed `.userInteractive` threads landing almost entirely on
-efficiency cores, which contradicts how placement was described earlier in the
-project. See [docs/mechanisms.md §3](docs/mechanisms.md). All measurements
-tonight were taken from a shell spawned by an automation harness, and I could
-not rule out a task-level scheduling role affecting the result.
+Placement has been measured here as a per-second time series at 6, 12 and 18
+threads plus a staggered ramp: `.userInteractive` fills the performance cores
+first and spills to efficiency cores only once the P cluster saturates, with no
+ramp and no settling window. See
+[docs/mechanisms.md](docs/mechanisms.md) section 3.
 
-**To close it:** from an ordinary Terminal window, machine otherwise idle:
+That is one machine. The fill order and the absence of a ramp are both worth
+confirming on different core configurations, particularly parts with an
+asymmetric split such as an M4 Max at 12P+4E.
+
+**To close it:**
 
 ```sh
-swift Tools/measure-core-placement.swift
+swift Tools/measure-core-placement.swift --threads 6 --seconds 120
+swift Tools/measure-core-placement.swift --threads 12 --seconds 120 --stagger 30
 ```
 
-If `.userInteractive` threads fill cpu6–11 there, the earlier description was
-right and the harness was the problem. If they fill cpu0–5 as they did tonight,
-then macOS fills efficiency cores first regardless of QoS, and the
-documentation is correct as it now stands.
+Every run prints its own scheduling context, so an anomalous result carries the
+information needed to explain it.
