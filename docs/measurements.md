@@ -62,6 +62,53 @@ re-measured on a power state change, but the need for it is unconfirmed. See
 
 ---
 
+## Core placement over time
+
+`Tools/measure-core-placement.swift` · per-second series, not averages · one
+run per configuration · `.userInteractive` · baseline E≈33% P≈14%
+
+Cluster means by window, 120 seconds each:
+
+| threads | window | P-cores | E-cores |
+|---|---|---:|---:|
+| 6 | 0–10 s | 93.5% | 29.9% |
+| 6 | 30–60 s | 93.3% | — |
+| 6 | 90–120 s | 93.1% | 29.4% |
+| 12 | 0–10 s | 99.7% | 93.3% |
+| 12 | 90–120 s | 99.7% | 96.3% |
+| 18 | 0–10 s | 100.0% | 99.9% |
+| 18 | 90–120 s | 100.0% | 99.9% |
+
+Across all 120 samples at 6 threads, P ranged 91.5–97.9% with no trend. **No
+ramp, so no settling window is needed and short measurements are unbiased.**
+
+Twelve threads spawned gradually over 30 seconds, which shows the fill order
+directly:
+
+| window | threads | P-cores | E-cores |
+|---|---:|---:|---:|
+| 0–10 s | 1→4 | 53.0% | 24.4% |
+| 10–20 s | 4→8 | 92.5% | 30.8% |
+| 20–30 s | 8→12 | 99.0% | 77.2% |
+| 30–45 s | 12 | 99.7% | 95.2% |
+| 75–120 s | 12 | 99.9% | 99.2% |
+
+E stays at or below baseline until the P cluster saturates.
+
+Controls, 25–60 s each, all giving P ≈ 93–96%:
+
+| control | P-cores |
+|---|---:|
+| immediately after 90 s of sustained 100% load | 93.0% |
+| launched detached from a subshell | 94.8% |
+| launched in the foreground | 96.1% |
+
+These were attempts to reproduce a single earlier 5-second sample that showed
+the opposite ordering. None succeeded. See
+[mechanisms.md §3](mechanisms.md#3-qos-placement-p-cores-fill-first-and-there-is-no-ramp).
+
+---
+
 ## Duty cycle accuracy
 
 `stressd run --cpu N --duration 3m` · one run per point · 1 Hz sampling ·

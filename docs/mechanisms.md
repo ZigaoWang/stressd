@@ -101,63 +101,83 @@ tier, which holds the duty cycle with no effect on placement.
 
 ---
 
-## 3. QoS is a placement hint, and weaker than I first claimed
+## 3. QoS placement: P-cores fill first, and there is no ramp
 
-**Partly verified, partly unresolved. This section corrects an earlier
-overstatement.**
+**Verified by time series.** This section has been wrong twice; the current
+version rests on seven runs rather than one.
 
 macOS exposes no public API for pinning a thread to a core class. There is no
 `pthread_setaffinity_np`, and `thread_policy_set` with
-`THREAD_AFFINITY_POLICY` is documented as unsupported on Apple silicon.
+`THREAD_AFFINITY_POLICY` is documented as unsupported on Apple silicon. QoS is
+the only lever, and it is a hint.
 
-### What is verified
+### What the hint actually does
 
-**`.background` is confined to the efficiency cores.** With a 100 ms period and
-no latency tier, `--level efficiency` leaves P-cores at 8–10%, this machine's
-baseline. Requesting latency tier 0 broke that confinement and put 40–60% on
-P-cores. Confinement holds, and the tier breaks it.
+`.userInteractive` threads are placed on **performance cores first**, and spill
+to efficiency cores only once the P cluster is saturated. Per-second series,
+120 seconds each, 12-core M3 Pro, baseline E≈33% P≈14%:
 
-### What I got wrong
+| threads | P-cores | E-cores |
+|---|---|---|
+| 6 | **93.5%**, flat across all five windows | ~30%, i.e. baseline |
+| 12 | 99.7%, flat | 93.3% rising slowly to 96.3% |
+| 18 | 100% | 99.9% |
 
-I initially described `.userInteractive` as biasing work *onto* P-cores. Late
-testing does not support that. Six `.userInteractive` spinning threads, plain
-pthreads with no stressd code involved, measured per logical CPU:
+Six threads is exactly the P-core count, and they fill it without touching the
+E-cores. The staggered run makes the ordering unmistakable — twelve threads
+spawned gradually over 30 seconds:
 
-```
-cpu0-5  (E)  100% 100% 100% 100% 100% 100%
-cpu6-11 (P)   81%  17%   0%   0%   0%   0%
-```
+| window | threads running | P-cores | E-cores |
+|---|---:|---:|---:|
+| 0–10 s | 1→4 | 53.0% | 24.4% |
+| 10–20 s | 4→8 | 92.5% | 30.8% |
+| 20–30 s | 8→12 | 99.0% | 77.2% |
+| 30–45 s | 12 | 99.7% | 95.2% |
 
-Twelve such threads: E mean 100%, P mean 25.7%, with only two P-cores carrying
-anything. The CPU index map was confirmed correct from the device tree in the
-same run, so this is not a labelling error.
+E-core utilization sits at or below baseline until the P cluster is full, then
+climbs. That is an ordered fill, not a preference for E.
 
-**The scheduler fills efficiency cores first and spills to performance cores
-only reluctantly, even for `.userInteractive` work.** So `--level performance`
-does not do what its name suggests when there are fewer threads than E-cores;
-the request is honoured as "not restricted to E", not as "placed on P".
+`.background` remains confined to the efficiency cores, which is the other
+half of the same story.
 
-### What is unresolved
+### There is no ramp, and short measurements are not biased
 
-Earlier the same night, `--cpu 55` measured P at 76.2% and E at 89.6%, so
-P-cores were being used then. Between the two measurements the machine's own
-baseline load rose substantially (E-cores went from roughly 30% to 60–75%
-busy). I do not know whether the difference is:
+The reason this was measured as a series rather than a mean: a scheduler that
+engages P-cores only after sustained saturation would make every short
+measurement in this project read low, and the tables would need re-taking with
+a stated settling window.
 
-- the scheduler's E-first policy interacting with a busier machine,
-- a task-level scheduling role applied to processes spawned from an automation
-  harness rather than an interactive session — `PRIO_DARWIN_PROCESS` was 0 and
-  the thread QoS read back as `USER_INTERACTIVE`, so the obvious clamps were
-  ruled out, but `task_role` was not checked, or
-- something else entirely.
+**That is not what happens.** With six threads, P-core utilization is 93.5% in
+the very first ten-second window and 93.1% in the last, varying between 91.5%
+and 97.9% across all 120 samples with no trend. There is no time constant to
+find, and no settling window is required.
 
-What would settle it: run `Tools/measure-core-placement.swift` from an ordinary
-interactive Terminal session on an otherwise-idle machine, and compare against
-the same script run from a background context. If placement differs, the cause
-is the scheduling role; if it does not, it is the E-first policy under load.
+### The measurement I could not reproduce
+
+One earlier run measured the opposite — six `.userInteractive` threads pinning
+cpu0–5 (E) at 100% while cpu6–11 (P) sat near zero. I took that at face value
+and rewrote this section and the README around it. That was a mistake: it was a
+single 5-second sample, and it is now contradicted by seven runs.
+
+Deliberate attempts to reproduce it all failed:
+
+- **Thermal recovery**: measuring immediately after 90 seconds of sustained
+  100% load gave P = 93.0%, unchanged.
+- **Launch context**: run detached from a subshell, the way the outlier was
+  launched, gave P = 94.8% against 96.1% in the foreground.
+- **Machine load**: baseline varied from 26% to 57% across tonight's runs with
+  no effect on the ordering.
+
+I do not know what produced it. The honest reading is that it was a
+contaminated or unlucky sample, and that the behaviour documented above is the
+real one. It is recorded here rather than deleted because an unexplained
+observation is worth more in the open than quietly dropped.
 
 stressd always reports observed per-core utilization next to requested
-placement, which is exactly why this was caught at all.
+placement, which is what made both the error and its correction visible.
+
+Reproduce with `Tools/measure-core-placement.swift`, which emits the full
+series rather than an average.
 
 ---
 

@@ -136,12 +136,17 @@ Folding@home and mlucas, and a real power curve. All are implemented and
 tested against fixtures. [DEFERRED.md](DEFERRED.md) lists each one with the
 exact command to close it.
 
-**A correction.** Earlier versions of this README claimed `.userInteractive`
-biases work onto performance cores. Late measurement did not support that: six
-such threads filled cpu0–5 (the E-cores) and left the P-cores idle. What is
-verified is the *other* direction — `.background` is confined to E-cores. See
-[docs/mechanisms.md §3](docs/mechanisms.md), which also says what is still
-unresolved about it.
+**Placement, measured as a time series.** `.userInteractive` threads fill the
+performance cores first and spill to efficiency cores only once the P cluster
+is saturated — six threads hold P at 93.5% without touching E, and a staggered
+ramp shows E rising only after P is full. There is **no ramp and no settling
+window**: P is at 93.5% in the first ten-second window and flat for two
+minutes. `.background` stays confined to E-cores.
+
+An intermediate version of this README claimed the opposite, based on a single
+5-second sample that seven later runs contradict and that I could not
+reproduce. Both the claim and the failed reproduction attempts are written up
+in [docs/mechanisms.md §3](docs/mechanisms.md).
 
 ---
 
